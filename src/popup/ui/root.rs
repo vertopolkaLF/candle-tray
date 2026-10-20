@@ -25,7 +25,7 @@ use super::{
     theme::{self, HslaExt, Palette},
 };
 use crate::app::{AppModel, MonitorRow};
-use crate::monitors::{BrightnessBackend, MonitorKind};
+use crate::monitors::BrightnessBackend;
 
 /// Fluent motion tokens used by Windows edge panels.
 const OPEN_ANIMATION: Duration = Duration::from_millis(250);
@@ -927,6 +927,7 @@ impl PopupRoot {
         }
         let controllable: Vec<&MonitorRow> =
             rows.iter().filter(|row| row.slider.is_some()).collect();
+        let mut sections = Vec::new();
         if linked && controllable.len() > 1 {
             let average = controllable
                 .iter()
@@ -944,16 +945,41 @@ impl PopupRoot {
                 .collect();
             let contrast = (!contrasts.is_empty())
                 .then(|| (contrasts.iter().sum::<u32>() / contrasts.len() as u32) as u8);
-            body.push(self.render_linked_card(average as u8, contrast, names, inner_width, cx));
+            sections.push(self.render_linked_card(average as u8, contrast, names, inner_width, cx));
             for row in rows.iter().filter(|row| row.monitor.sdr.is_some()) {
-                body.push(self.render_monitor_card(row, true, inner_width, cx));
+                sections.push(self.render_monitor_card(row, true, inner_width, cx));
             }
         } else {
             for row in &rows {
-                body.push(self.render_monitor_card(row, false, inner_width, cx));
+                sections.push(self.render_monitor_card(row, false, inner_width, cx));
             }
         }
+        for (index, section) in sections.into_iter().enumerate() {
+            if index > 0 {
+                body.push(self.divider());
+            }
+            body.push(section);
+        }
         body
+    }
+
+    /// Hairline between flat display sections.
+    fn divider(&self) -> AnyElement {
+        div()
+            .h(px(1.0))
+            .flex_none()
+            .bg(self.palette.divider)
+            .into_any_element()
+    }
+
+    /// A display section: card padding without the card's fill or stroke.
+    fn section(&self) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .px(px(12.0))
+            .py(px(2.0))
     }
 
     /// First-run card offering to import Twinkle Tray settings.
@@ -1062,7 +1088,6 @@ impl PopupRoot {
 
     fn card_header(
         &self,
-        icon_name: &str,
         title: String,
         trailing: Option<String>,
         caption: Option<(String, gpui::Hsla)>,
@@ -1092,7 +1117,7 @@ impl PopupRoot {
             .flex_row()
             .items_center()
             .gap(px(10.0))
-            .child(icon(icon_name, 18.0, palette.text_secondary))
+            .min_h(px(32.0))
             .child(text);
         if let Some(trailing) = trailing {
             header = header.child(
@@ -1167,7 +1192,6 @@ impl PopupRoot {
             model.update(cx, |model, cx| model.set_all(value, cx));
         });
         let header = self.card_header(
-            "fluent-link",
             crate::i18n::tr("popup-all-displays").to_owned(),
             None,
             Some((names, self.palette.text_secondary)),
@@ -1195,7 +1219,7 @@ impl PopupRoot {
                 cx,
             )
         });
-        self.card()
+        self.section()
             .child(header)
             .child(slider)
             .children(contrast)
@@ -1210,10 +1234,6 @@ impl PopupRoot {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let palette = self.palette.clone();
-        let icon_name = match row.monitor.kind {
-            MonitorKind::Internal => "fluent-laptop",
-            MonitorKind::External => "fluent-desktop",
-        };
         let unresponsive = row.monitor.unresponsive;
         let off = row.monitor.powered_off;
         // Off shows in the trailing slot: a caption line would grow the card.
@@ -1236,9 +1256,9 @@ impl PopupRoot {
         let power = matches!(row.monitor.backend, BrightnessBackend::Ddc { .. })
             .then(|| self.power_button(&row.monitor.id, off, cx));
         let enabled = !unresponsive && !off;
-        let header = self.card_header(icon_name, row.name.clone(), trailing, caption, power);
+        let header = self.card_header(row.name.clone(), trailing, caption, power);
         let mut card = self
-            .card()
+            .section()
             .when(unresponsive, |card| card.opacity(0.7))
             .child(header);
         if !sdr_only && let Some(value) = row.slider {
