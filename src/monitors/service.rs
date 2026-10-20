@@ -71,6 +71,14 @@ struct Slot {
     active: bool,
 }
 impl Slot {
+    /// Nothing in flight and nothing waiting to be dispatched.
+    fn idle(&self) -> bool {
+        self.busy.is_none()
+            && self.throttle.pending.is_empty()
+            && self.refresh.is_none()
+            && !self.capabilities
+            && !(self.power && self.monitor.supports_ddc_power)
+    }
     fn expire(&mut self, now: Instant) -> bool {
         if self
             .busy
@@ -214,6 +222,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
     let mut reasons = vec![SnapshotReason::Startup];
     let mut debounce: Option<(Instant, SnapshotReason)> = None;
     let mut windows_off_at: Option<Instant> = None;
+    let mut queued = std::collections::VecDeque::new();
     loop {
         if windows_off_at.is_some_and(|at| Instant::now() >= at) {
             windows_off_at = None;
@@ -238,7 +247,11 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
         }
         // Bound each drain so continuous slider input cannot starve deadlines.
         for _ in 0..256 {
-            match commands.try_recv() {
+            let next = match queued.pop_front() {
+                Some(command) => Ok(command),
+                None => commands.try_recv(),
+            };
+            match next {
                 Ok(Command::Shutdown) | Err(mpsc::TryRecvError::Disconnected) => return,
                 Err(mpsc::TryRecvError::Empty) => break,
                 Ok(Command::Refresh) => refresh = Some(SnapshotReason::Requested),
@@ -408,7 +421,22 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
             }
         }
         slots.retain(|_, slot| slot.active || slot.busy.is_some());
-        thread::sleep(Duration::from_millis(10));
+        // Poll quickly only while work is in flight; an idle tray app must not
+        // wake the CPU 100 times a second. Commands wake the idle wait at once.
+        let idle = refresh.is_none()
+            && debounce.is_none()
+            && windows_off_at.is_none()
+            && snapshot.is_none()
+            && slots.values().all(Slot::idle);
+        if idle {
+            match commands.recv_timeout(Duration::from_millis(250)) {
+                Ok(command) => queued.push_back(command),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        } else {
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 fn sorted(slots: &HashMap<String, Slot>, ids: Option<&Vec<String>>) -> Vec<Monitor> {
