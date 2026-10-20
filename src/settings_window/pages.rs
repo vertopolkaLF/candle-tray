@@ -7,7 +7,7 @@ use gpui::{
 use super::kit::{self, Button, Kit, Row, SliderRange};
 use super::window::SettingsWindow;
 use crate::monitors::{BrightnessBackend, MonitorKind};
-use crate::settings::{Language, PopupMaterial, Theme, TrayIcon};
+use crate::settings::{AcrylicBrightness, Language, PopupMaterial, Theme, TrayIcon};
 
 /// Update intervals offered while dragging, in milliseconds.
 const UPDATE_INTERVALS: [u32; 5] = [50, 100, 250, 500, 1000];
@@ -72,6 +72,16 @@ impl SettingsWindow {
             .iter()
             .position(|icon| *icon == s.tray_icon)
             .unwrap_or(0);
+        let brightness_labels = [
+            crate::i18n::tr("settings-acrylic-brightness-normal"),
+            crate::i18n::tr("settings-acrylic-brightness-bright"),
+            crate::i18n::tr("settings-acrylic-brightness-brighter"),
+        ];
+        let brightness_index = match s.acrylic_brightness {
+            AcrylicBrightness::Normal => 0,
+            AcrylicBrightness::Bright => 1,
+            AcrylicBrightness::Brighter => 2,
+        };
         let appearance = kit::card_of(k, |k| {
             vec![
                 kit::dropdown_row(
@@ -125,6 +135,24 @@ impl SettingsWindow {
                             _ => PopupMaterial::Acrylic,
                         };
                         this.edit(cx, move |settings| settings.popup_material = material);
+                    }),
+                ),
+                kit::dropdown_row(
+                    k,
+                    "general-acrylic-brightness",
+                    tr("settings-acrylic-brightness"),
+                    Some(&crate::i18n::tr("settings-acrylic-brightness-description")),
+                    brightness_labels.iter().map(|l| l.clone().into()).collect(),
+                    brightness_index,
+                    s.popup_material != PopupMaterial::Acrylic,
+                    Self::h(cx, |this, index: usize, _, cx| {
+                        let brightness = match index {
+                            1 => AcrylicBrightness::Bright,
+                            2 => AcrylicBrightness::Brighter,
+                            _ => AcrylicBrightness::Normal,
+                        };
+                        this.edit(cx, move |settings| settings.acrylic_brightness = brightness);
+                        crate::popup::send_command(crate::popup::PopupCommand::AppearanceChanged);
                     }),
                 ),
                 Row::new("row-general-tray-icon", tr("settings-tray-icon"))

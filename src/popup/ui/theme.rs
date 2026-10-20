@@ -6,7 +6,7 @@
 
 use gpui::{Hsla, Rgba, SharedString};
 
-use crate::settings::{PopupMaterial, Theme};
+use crate::settings::{AcrylicBrightness, PopupMaterial, Theme};
 
 pub(crate) fn rgba8(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     Rgba {
@@ -72,6 +72,7 @@ pub(crate) struct Palette {
     pub(crate) chrome_icon: Hsla,
     pub(crate) chrome_icon_hover: Hsla,
     pub(crate) material: PopupMaterial,
+    pub(crate) acrylic_brightness: AcrylicBrightness,
 }
 
 impl Palette {
@@ -94,7 +95,12 @@ impl Palette {
             PopupMaterial::Acrylic => {}
         }
         let opacity = if frosted {
-            if self.dark { 0.15 } else { 0.25 }
+            match (self.dark, self.acrylic_brightness) {
+                (false, _) => 0.25,
+                (true, AcrylicBrightness::Normal) => 0.15,
+                (true, AcrylicBrightness::Bright) => 0.08,
+                (true, AcrylicBrightness::Brighter) => 0.0,
+            }
         } else if self.dark {
             0.94
         } else {
@@ -106,10 +112,15 @@ impl Palette {
     /// Lightness source of the Mica/Acrylic backdrop: the Fluent base
     /// (#202020 dark, near-white light). Dark acrylic is lifted well above
     /// the WinUI base: measured against Twinkle Tray's flyout, #2C2C2C still
-    /// rendered near #202020 once the tint was composited.
+    /// rendered near #202020 once the tint was composited. The brighter
+    /// steps lift it further for users who want more wallpaper glow.
     pub(crate) fn backdrop_luminosity(&self) -> (u8, u8, u8) {
         let level = match (self.dark, self.material) {
-            (true, PopupMaterial::Acrylic) => 66,
+            (true, PopupMaterial::Acrylic) => match self.acrylic_brightness {
+                AcrylicBrightness::Normal => 66,
+                AcrylicBrightness::Bright => 100,
+                AcrylicBrightness::Brighter => 140,
+            },
             (true, _) => 32,
             (false, _) => 245,
         };
@@ -121,6 +132,7 @@ impl Palette {
         accent: crate::theme::AccentRamp,
         material: PopupMaterial,
         font_family: SharedString,
+        acrylic_brightness: AcrylicBrightness,
     ) -> Self {
         let accent_fill = rgb8(accent.fill(dark));
         Self {
@@ -217,6 +229,7 @@ impl Palette {
                 rgb8((17, 17, 17))
             },
             material,
+            acrylic_brightness,
         }
     }
 }

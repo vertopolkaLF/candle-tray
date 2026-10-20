@@ -661,12 +661,14 @@ fn build_palette(
     window: &Window,
     cx: &App,
 ) -> Palette {
-    let theme = model.read(cx).settings.theme;
+    let settings = &model.read(cx).settings;
+    let theme = settings.theme;
     Palette::new(
         theme::resolve_dark(theme, theme::system_dark(window)),
         crate::theme::accent_ramp(),
         crate::popup::background_material(),
         default_font.clone(),
+        settings.acrylic_brightness,
     )
 }
 
