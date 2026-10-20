@@ -10,7 +10,7 @@ use gpui::Context;
 
 use crate::levels;
 use crate::monitors::{Command, Event, LevelTarget, Monitor, MonitorService, SnapshotReason};
-use crate::settings::{MonitorSettings, Settings};
+use crate::settings::{MonitorSettings, Settings, Template, TemplateIcon, TemplateLevels};
 use crate::twinkle_import::PendingImport;
 
 /// Persists a settings snapshot off the UI thread (the serial settings
@@ -388,6 +388,149 @@ impl AppModel {
             on,
         });
         cx.notify();
+    }
+
+    // ----- templates ---------------------------------------------------------
+
+    /// Current levels of every visible display, as a template would save them.
+    fn current_levels(&self) -> std::collections::BTreeMap<String, TemplateLevels> {
+        self.rows()
+            .into_iter()
+            .filter(|row| !row.monitor.unresponsive)
+            .filter_map(|row| {
+                let levels = TemplateLevels {
+                    brightness: row.slider,
+                    sdr: row.monitor.sdr.map(|sdr| sdr.percent),
+                    contrast: row.contrast(),
+                };
+                (levels != TemplateLevels::default()).then(|| (row.monitor.id.clone(), levels))
+            })
+            .collect()
+    }
+
+    /// Whether the bottom bar can save a template right now.
+    pub fn can_save_template(&self) -> bool {
+        !self.current_levels().is_empty()
+    }
+
+    /// Save the current levels as a new template; returns its index.
+    pub fn save_template(&mut self, cx: &mut Context<Self>) -> Option<usize> {
+        let levels = self.current_levels();
+        if levels.is_empty() {
+            return None;
+        }
+        // A fresh glyph tells the new template apart until the user picks one.
+        let icon = TemplateIcon::ALL
+            .into_iter()
+            .find(|icon| self.settings.templates.iter().all(|t| t.icon != *icon))
+            .unwrap_or_default();
+        self.edit(cx, |settings| {
+            settings.templates.push(Template { icon, levels })
+        });
+        Some(self.settings.templates.len() - 1)
+    }
+
+    /// Apply a template to the connected displays it knows.
+    pub fn apply_template(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(template) = self.settings.templates.get(index).cloned() else {
+            return;
+        };
+        let mut targets = Vec::new();
+        for (id, saved) in &template.levels {
+            let Some(monitor) = self
+                .monitors
+                .iter_mut()
+                .find(|m| m.id == *id && !m.unresponsive)
+            else {
+                continue;
+            };
+            let entry = self.settings.monitors.entry(id.clone()).or_default();
+            let mut target = LevelTarget {
+                id: id.clone(),
+                brightness: None,
+                sdr: None,
+                contrast: None,
+            };
+            if let Some(slider) = saved.brightness.filter(|_| monitor.brightness.is_some()) {
+                let hardware = levels::to_hardware(slider, entry.min, entry.max);
+                monitor.brightness = Some(hardware);
+                entry.last_brightness = Some(slider);
+                target.brightness = Some(hardware);
+            }
+            if let (Some(percent), Some(sdr)) = (saved.sdr, monitor.sdr.as_mut()) {
+                let percent = percent.min(100);
+                sdr.percent = percent;
+                entry.last_sdr = Some(percent);
+                target.sdr = Some(percent);
+            }
+            if let Some(percent) = saved.contrast.filter(|_| monitor.contrast.is_some()) {
+                let percent = percent.min(100);
+                monitor.contrast = Some(percent);
+                entry.last_contrast = Some(percent);
+                target.contrast = Some(percent);
+            }
+            if target.brightness.is_some() || target.sdr.is_some() || target.contrast.is_some() {
+                self.local_edits.insert(id.clone(), Instant::now());
+                targets.push(target);
+            }
+        }
+        if !targets.is_empty() {
+            self.service.send(Command::Apply(targets));
+            self.save();
+            cx.notify();
+        }
+    }
+
+    /// The connected displays a template knows all show its levels.
+    pub fn template_active(&self, template: &Template) -> bool {
+        let mut matched = false;
+        for (id, saved) in &template.levels {
+            let Some(monitor) = self.monitors.iter().find(|m| m.id == *id) else {
+                continue;
+            };
+            let entry = self.settings.monitor(id);
+            let brightness = monitor
+                .brightness
+                .map(|hardware| levels::from_hardware(hardware, entry.min, entry.max));
+            let same = |saved: Option<u8>, current: Option<u8>| {
+                saved.is_none() || current.is_none() || saved == current
+            };
+            if !same(saved.brightness, brightness)
+                || !same(saved.sdr, monitor.sdr.map(|sdr| sdr.percent))
+                || !same(saved.contrast, monitor.contrast)
+            {
+                return false;
+            }
+            matched = true;
+        }
+        matched
+    }
+
+    pub fn set_template_icon(&mut self, index: usize, icon: TemplateIcon, cx: &mut Context<Self>) {
+        self.edit(cx, |settings| {
+            if let Some(template) = settings.templates.get_mut(index) {
+                template.icon = icon;
+            }
+        });
+    }
+
+    /// Move a template to another place in the bottom bar.
+    pub fn move_template(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        self.edit(cx, |settings| {
+            let templates = &mut settings.templates;
+            if from < templates.len() && to < templates.len() && from != to {
+                let moved = templates.remove(from);
+                templates.insert(to, moved);
+            }
+        });
+    }
+
+    pub fn delete_template(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.edit(cx, |settings| {
+            if index < settings.templates.len() {
+                settings.templates.remove(index);
+            }
+        });
     }
 
     pub fn refresh(&self) {

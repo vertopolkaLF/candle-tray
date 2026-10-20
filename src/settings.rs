@@ -80,6 +80,62 @@ impl TrayIcon {
     ];
 }
 
+/// Glyph of a level template in the popup's bottom bar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateIcon {
+    #[default]
+    Sun,
+    Moon,
+    Lightbulb,
+    Book,
+    Movie,
+    Game,
+    Code,
+    Work,
+    Coffee,
+    Home,
+    Star,
+    Heart,
+}
+
+impl TemplateIcon {
+    pub const ALL: [Self; 12] = [
+        Self::Sun,
+        Self::Moon,
+        Self::Lightbulb,
+        Self::Book,
+        Self::Movie,
+        Self::Game,
+        Self::Code,
+        Self::Work,
+        Self::Coffee,
+        Self::Home,
+        Self::Star,
+        Self::Heart,
+    ];
+}
+
+/// Levels a template stores for one display; `None` leaves that level alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TemplateLevels {
+    /// Slider (normalized) brightness.
+    pub brightness: Option<u8>,
+    /// SDR white level percent.
+    pub sdr: Option<u8>,
+    /// Contrast percent.
+    pub contrast: Option<u8>,
+}
+
+/// Saved levels applied in one click from the popup's bottom bar.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Template {
+    pub icon: TemplateIcon,
+    pub levels: BTreeMap<MonitorId, TemplateLevels>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOffSetting {
@@ -156,6 +212,8 @@ pub struct Settings {
     pub monitors: BTreeMap<MonitorId, MonitorSettings>,
     /// Set once the Twinkle Tray import prompt was answered either way.
     pub twinkle_import_done: bool,
+    /// Level templates in bottom-bar order.
+    pub templates: Vec<Template>,
 }
 
 impl Default for Settings {
@@ -175,6 +233,7 @@ impl Default for Settings {
             order: Vec::new(),
             monitors: BTreeMap::new(),
             twinkle_import_done: false,
+            templates: Vec::new(),
         }
     }
 }
@@ -426,6 +485,23 @@ mod tests {
         assert_eq!(settings.update_interval_ms, 100);
         assert_eq!(settings.monitors["a"].max, 100);
         assert!(settings.restore_levels);
+    }
+    #[test]
+    fn templates_round_trip() {
+        let mut settings = Settings::default();
+        settings.templates.push(Template {
+            icon: TemplateIcon::Moon,
+            levels: BTreeMap::from([(
+                r"\?\DISPLAY#DEL#1".to_owned(),
+                TemplateLevels {
+                    brightness: Some(30),
+                    sdr: None,
+                    contrast: Some(55),
+                },
+            )]),
+        });
+        let raw = toml::to_string_pretty(&settings).unwrap();
+        assert_eq!(toml::from_str::<Settings>(&raw).unwrap(), settings);
     }
     #[test]
     fn corrupt_settings_are_preserved() {
