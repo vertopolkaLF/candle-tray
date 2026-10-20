@@ -1,0 +1,31 @@
+{
+  "name": "tt-windows-utils",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "npm run rebuild",
+    "rebuild": "node-gyp rebuild",
+    "install": "npm run rebuild"
+  },
+  "keywords": [],
+  "author": "xanderfrangos",
+  "license": "MIT",
+  "bugs": {},
+  "homepage": "",
+  "dependencies": {
+    "bindings": "1.5.0",
+    "node-addon-api": "^7.0.0"
+  },
+  "files": [
+    "index.js",
+    "binding.gyp",
+    "windows_brightness_keys.cc",
+    "windows_media_status.cc",
+    "windows_power_events.cc",
+    "windows_window_utils.cc",
+    "windows_window_material.cc",
+    "windows_app_startup.cc",
+    "windows_display_brightness.cc"
+  ]
+}

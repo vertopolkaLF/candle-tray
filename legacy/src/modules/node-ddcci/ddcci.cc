@@ -1,0 +1,1620 @@
+#include <napi.h>
+
+#include "HighLevelMonitorConfigurationAPI.h"
+#include "LowLevelMonitorConfigurationAPI.h"
+#include "PhysicalMonitorEnumerationAPI.h"
+#include "windows.h"
+#include "winuser.h"
+
+#include <iostream>
+#include <map>
+#include <sstream>
+#include <vector>
+#include <set>
+#include <list>
+#include <thread>
+#include <chrono>
+#include <iomanip>
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+
+struct Monitor {
+    HMONITOR handle;
+    std::string monitorName;
+    std::vector<HANDLE> physicalHandles;
+    std::vector<std::string> physicalDescriptions;
+};
+
+struct MonitorHighLevel {
+    DWORD capabilities = 0;
+    DWORD capabilitiesOK = 0;
+    DWORD supportedTemperatures = 0;
+    DWORD brightness = 0;
+    DWORD brightnessMin = 0;
+    DWORD brightnessMax = 0;
+    DWORD brightnessOK = 0;
+    DWORD contrast = 0;
+    DWORD contrastMin = 0;
+    DWORD contrastMax = 0;
+    DWORD contrastOK = 0;
+};
+
+struct PhysicalMonitor {
+    HANDLE handle;
+    bool handleIsValid;
+    bool ddcciSupported;
+    std::string name;
+    std::string fullName;
+    std::string physicalName;
+    std::string result;
+    std::string deviceKey;
+    std::string deviceID;
+    MonitorHighLevel hlCapabilities;
+};
+
+struct DisplayDevice {
+    std::string adapterName;
+    std::string deviceName;
+    std::string deviceID;
+    std::string deviceKey;
+};
+
+struct DisplayMonitor {
+    std::string adapterName;
+    std::list<HMONITOR> handles;
+};
+
+std::map<std::string, HANDLE> handles;
+std::map<std::string, PhysicalMonitor> physicalMonitorHandles;
+std::map<std::string, std::string> capabilities;
+
+PhysicalMonitor*
+findPhysicalMonitor(const std::string& monitorName)
+{
+    for (auto& entry : physicalMonitorHandles) {
+        PhysicalMonitor& monitor = entry.second;
+        if (entry.first == monitorName || monitor.name == monitorName
+            || monitor.fullName == monitorName
+            || monitor.physicalName == monitorName
+            || monitor.deviceKey == monitorName
+            || monitor.deviceID == monitorName) {
+            return &monitor;
+        }
+    }
+
+    return nullptr;
+}
+
+void
+applyCapabilitiesResult(PhysicalMonitor* monitor,
+                        const std::string& result)
+{
+    if (monitor == nullptr || result.empty()) return;
+
+    monitor->result = result;
+    monitor->ddcciSupported = true;
+    if (!monitor->deviceKey.empty()) {
+        capabilities[monitor->deviceKey] = result;
+    }
+}
+
+int logLevel = 0;
+
+// `handles` owns every physical-monitor handle. `physicalMonitorHandles`
+// stores metadata only and must never destroy its copy of a handle.
+void
+destroyPhysicalMonitorHandles(std::vector<struct Monitor>& monitors)
+{
+    for (auto& monitor : monitors) {
+        for (auto& handle : monitor.physicalHandles) {
+            if (handle != NULL) {
+                DestroyPhysicalMonitor(handle);
+                handle = NULL;
+            }
+        }
+    }
+}
+
+// Info
+void
+p(std::string s)
+{
+    if(logLevel >= 1) {
+        std::cout << "[node-ddcci] " + s << std::endl;
+    }
+}
+
+// Debug
+void
+d(std::string s)
+{
+    if(logLevel >= 2) {
+        std::cout << "[node-ddcci] " + s << std::endl;
+    }
+}
+
+void
+clearMonitorData()
+{
+    if (!handles.empty()) {
+        for (auto const& handle : handles) {
+            DestroyPhysicalMonitor(handle.second);
+        }
+        handles.clear();
+    }
+    if (!physicalMonitorHandles.empty()) {
+        physicalMonitorHandles.clear();
+    }
+    if (!capabilities.empty()) {
+        capabilities.clear();
+    }
+}
+
+void
+cleanMonitorHandles(std::map<std::string, HANDLE> newHandles)
+{
+    for (auto const& handle : handles) {
+        bool found = false;
+        for (auto const& newHandle : newHandles) {
+            if (handle.second == newHandle.second) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            DestroyPhysicalMonitor(handle.second);
+        }
+    }
+    handles.clear();
+}
+
+std::string
+getLastErrorString(DWORD errorCode)
+{
+    if (!errorCode) {
+        return std::string();
+    }
+
+    LPSTR buf = NULL;
+    DWORD size =
+      FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM
+                      | FORMAT_MESSAGE_IGNORE_INSERTS,
+                    NULL,
+                    errorCode,
+                    LANG_SYSTEM_DEFAULT,
+                    (LPSTR)&buf,
+                    0,
+                    NULL);
+
+    if (buf == NULL || size == 0) {
+        return std::string();
+    }
+
+    std::string message(buf, size);
+    LocalFree(buf);
+    return message;
+}
+
+std::string
+getLastErrorString()
+{
+    return getLastErrorString(GetLastError());
+}
+
+// DDC/CI failures that indicate a garbled message or an I2C bus glitch.
+// These are worth retrying, unlike permanent conditions such as an
+// unsupported VCP code or a monitor that no longer exists.
+bool
+isTransientDdcError(DWORD errorCode)
+{
+    switch (errorCode) {
+        case ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA:
+        case ERROR_GRAPHICS_I2C_ERROR_RECEIVING_DATA:
+        case ERROR_GRAPHICS_DDCCI_MONITOR_RETURNED_INVALID_TIMING_STATUS_BYTE:
+        case ERROR_GRAPHICS_DDCCI_INVALID_MESSAGE_COMMAND:
+        case ERROR_GRAPHICS_DDCCI_INVALID_MESSAGE_LENGTH:
+        case ERROR_GRAPHICS_DDCCI_INVALID_MESSAGE_CHECKSUM:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Runs a DDC/CI operation, retrying a couple of times when it fails with
+// a transient error. Returns TRUE on success; on failure, `errorCode`
+// holds the Win32 error of the last attempt.
+template<typename F>
+BOOL
+tryDdcCiOperation(F operation, DWORD& errorCode)
+{
+    const int maxAttempts = 3;
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (attempt > 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (operation()) {
+            return TRUE;
+        }
+        errorCode = GetLastError();
+        if (!isTransientDdcError(errorCode)) {
+            return FALSE;
+        }
+        std::stringstream hexCode;
+        hexCode << std::hex << std::uppercase << errorCode;
+        d("Transient DDC/CI error. Attempt #" + std::to_string(attempt)
+          + " failed with 0x" + hexCode.str());
+    }
+    return FALSE;
+}
+
+// Throws a JS error carrying the Win32 error code, so callers can
+// classify failures without parsing localized message strings.
+void
+throwDdcCiError(Napi::Env env, const std::string& message, DWORD errorCode)
+{
+    Napi::Error error =
+      Napi::Error::New(env, message + "\n" + getLastErrorString(errorCode));
+    error.Set("win32Code",
+              Napi::Number::New(env, static_cast<double>(errorCode)));
+    throw error;
+}
+
+std::string
+getPhysicalMonitorName(HMONITOR handle)
+{
+    MONITORINFOEX monitorInfo;
+    monitorInfo.cbSize = sizeof(MONITORINFOEX);
+    GetMonitorInfo(handle, &monitorInfo);
+    std::string monitorName =
+      static_cast<std::string>(monitorInfo.szDevice);
+
+    return monitorName;
+}
+
+std::map<std::string, DisplayDevice>
+getAllDisplays(std::string keyType,
+               std::vector<DisplayDevice>* orderedDisplays = nullptr)
+{
+    std::map<std::string, DisplayDevice> out;
+
+    DISPLAY_DEVICE adapterDev;
+    adapterDev.cb = sizeof(DISPLAY_DEVICE);
+
+    // Loop through adapters
+    int adapterDevIndex = 0;
+    while (EnumDisplayDevices(NULL, adapterDevIndex++, &adapterDev, 0)) {
+        DISPLAY_DEVICE displayDev;
+        displayDev.cb = sizeof(DISPLAY_DEVICE);
+
+        // Check valid target
+        if (!(adapterDev.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) {
+            //continue;
+        }
+
+        // Loop through displays (with device ID) on each adapter
+        int displayDevIndex = 0;
+        while (EnumDisplayDevices(adapterDev.DeviceName,
+                                  displayDevIndex++,
+                                  &displayDev,
+                                  EDD_GET_DEVICE_INTERFACE_NAME)) {
+
+            // Check valid target
+            if (!(displayDev.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) {
+                continue;
+            }
+
+            std::string deviceName =
+              static_cast<std::string>(displayDev.DeviceName);
+
+            DisplayDevice newDevice;
+            newDevice.adapterName = static_cast<std::string>(adapterDev.DeviceName);
+            newDevice.deviceName = static_cast<std::string>(displayDev.DeviceName);
+            newDevice.deviceID = static_cast<std::string>(displayDev.DeviceID);
+            newDevice.deviceKey =
+            newDevice.deviceID.substr(0, newDevice.deviceID.find("#{"));
+
+            if (orderedDisplays) {
+                orderedDisplays->push_back(newDevice);
+            }
+
+            out.insert(
+            { (keyType == "name" ? newDevice.deviceName : keyType == "adapter" ? newDevice.adapterName :  newDevice.deviceKey),
+                newDevice });
+
+        }
+    }
+    return out;
+}
+
+std::string
+wideToString(const wchar_t* wstr)
+{
+    if (!wstr) {
+        return "";
+    }
+
+    int sizeNeeded =
+      WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr, nullptr);
+    if (sizeNeeded <= 0) {
+        return "";
+    }
+    std::string str(sizeNeeded, 0);
+    if (WideCharToMultiByte(
+          CP_UTF8, 0, wstr, -1, &str[0], sizeNeeded, nullptr, nullptr)
+        != sizeNeeded) {
+        return "";
+    }
+    str.pop_back(); // Trailing null
+    return str;
+}
+
+struct DisplayConfigTarget {
+    std::string gdiDeviceName; // e.g. "\\.\DISPLAY2"
+    std::string devicePath;    // e.g. "\\?\DISPLAY#ABC1234#5&..#{GUID}"
+    std::string deviceKey;     // devicePath up to "#{"
+    std::string friendlyName;
+};
+
+// Lists active display paths with both their GDI source name and their
+// monitor device path and friendly name. The path is a stable identity once
+// a physical monitor has been associated with a target.
+std::vector<DisplayConfigTarget>
+getDisplayConfigTargets()
+{
+    std::vector<DisplayConfigTarget> targets;
+
+    UINT32 pathCount = 0;
+    UINT32 modeCount = 0;
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    LONG result = ERROR_SUCCESS;
+
+    do {
+        result =
+          GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount);
+        if (result != ERROR_SUCCESS) {
+            return targets;
+        }
+        paths.resize(pathCount);
+        modes.resize(modeCount);
+        result = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS,
+                                    &pathCount,
+                                    paths.data(),
+                                    &modeCount,
+                                    modes.data(),
+                                    NULL);
+    } while (result == ERROR_INSUFFICIENT_BUFFER);
+
+    if (result != ERROR_SUCCESS) {
+        return targets;
+    }
+    paths.resize(pathCount);
+
+    for (auto const& path : paths) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName = {};
+        sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        sourceName.header.size = sizeof(sourceName);
+        sourceName.header.adapterId = path.sourceInfo.adapterId;
+        sourceName.header.id = path.sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS) {
+            // A partial target list would shift the remaining indexes and
+            // could associate a physical handle with the wrong monitor.
+            // Return no targets so the caller uses the DISPLAY_DEVICE fallback.
+            return {};
+        }
+
+        DISPLAYCONFIG_TARGET_DEVICE_NAME targetName = {};
+        targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+        targetName.header.size = sizeof(targetName);
+        targetName.header.adapterId = path.targetInfo.adapterId;
+        targetName.header.id = path.targetInfo.id;
+        if (DisplayConfigGetDeviceInfo(&targetName.header) != ERROR_SUCCESS) {
+            return {};
+        }
+
+        DisplayConfigTarget target;
+        target.gdiDeviceName = wideToString(sourceName.viewGdiDeviceName);
+        target.devicePath = wideToString(targetName.monitorDevicePath);
+        target.deviceKey =
+          target.devicePath.substr(0, target.devicePath.find("#{"));
+        target.friendlyName = wideToString(targetName.monitorFriendlyDeviceName);
+        if (target.gdiDeviceName.empty() || target.devicePath.empty()) {
+            return {};
+        }
+        targets.push_back(target);
+    }
+    return targets;
+}
+
+std::vector<struct Monitor>
+getAllHandles() {
+    std::vector<struct Monitor> monitors;
+
+    auto monitorEnumProc = [](HMONITOR hMonitor,
+                              HDC hdcMonitor,
+                              LPRECT lprcMonitor,
+                              LPARAM dwData) -> BOOL {
+        auto monitors = reinterpret_cast<std::vector<struct Monitor>*>(dwData);
+        monitors->push_back({ hMonitor, {} });
+        return TRUE;
+    };
+    EnumDisplayMonitors(
+      NULL, NULL, monitorEnumProc, reinterpret_cast<LPARAM>(&monitors));
+
+    // Get physical monitor handles. Some displays (virtual, remote, and some
+    // USB displays) have none to give, so they're skipped rather than failing
+    // every other display with them.
+    try {
+    for (auto& monitor : monitors) {
+        monitor.monitorName = getPhysicalMonitorName(monitor.handle);
+
+        DWORD numPhysicalMonitors = 0;
+        if (!GetNumberOfPhysicalMonitorsFromHMONITOR(monitor.handle,
+                                                     &numPhysicalMonitors)) {
+            const DWORD errorCode = GetLastError();
+            p("Skipping " + monitor.monitorName
+              + ": couldn't get its physical monitor count. "
+              + getLastErrorString(errorCode));
+            continue;
+        }
+        if (numPhysicalMonitors == 0) {
+            p("Skipping " + monitor.monitorName + ": no physical monitors.");
+            continue;
+        }
+
+        // unique_ptr guarantees the array is freed on every path out of
+        // this iteration.
+        std::unique_ptr<PHYSICAL_MONITOR[]> physicalMonitors(
+          new PHYSICAL_MONITOR[numPhysicalMonitors]);
+
+        if (!GetPhysicalMonitorsFromHMONITOR(
+              monitor.handle, numPhysicalMonitors, physicalMonitors.get())) {
+            const DWORD errorCode = GetLastError();
+            p("Skipping " + monitor.monitorName
+              + ": couldn't get its physical monitors. "
+              + getLastErrorString(errorCode));
+            continue;
+        }
+
+        for (DWORD i = 0; i < numPhysicalMonitors; i++) {
+            monitor.physicalHandles.push_back(
+              physicalMonitors[i].hPhysicalMonitor);
+            monitor.physicalDescriptions.push_back(
+              wideToString(physicalMonitors[i].szPhysicalMonitorDescription));
+        }
+    }
+    } catch (...) {
+        destroyPhysicalMonitorHandles(monitors);
+        throw;
+    }
+
+    // Skipped displays own no handles, so dropping them leaks nothing
+    monitors.erase(std::remove_if(monitors.begin(), monitors.end(),
+                                  [](const struct Monitor& monitor) {
+                                      return monitor.physicalHandles.empty();
+                                  }),
+                   monitors.end());
+
+    return monitors;
+}
+
+MonitorHighLevel
+getHighLevelCapabilities(HANDLE handle) {
+    MonitorHighLevel monitor;
+
+    if(handle == NULL) {
+        d("No handle for capabilities data!");
+        return monitor;
+    }
+
+    // General capabilities
+    // Note: Displays that don't support color temperature seem to respond poorly to this function
+    /*
+    monitor.capabilitiesOK = GetMonitorCapabilities(handle, &monitor.capabilities, &monitor.supportedTemperatures);
+    d("== GetMonitorCapabilities: " + std::to_string(monitor.capabilitiesOK) + ": " + std::to_string(monitor.capabilities));
+
+    if(monitor.capabilitiesOK == 0) {
+        d("== Error: " + getLastErrorString());
+    }
+    */
+
+    // Brightness
+    monitor.brightnessOK = GetMonitorBrightness(handle, &monitor.brightnessMin, &monitor.brightness, &monitor.brightnessMax);
+    d("-- -- GetMonitorBrightness: " + std::to_string(monitor.brightnessOK) + ": " + std::to_string(monitor.brightness) + " (" + std::to_string(monitor.brightnessMin) + "-" + std::to_string(monitor.brightnessMax) + ")");
+
+    if(monitor.brightnessOK == 0) {
+        d("-- -- Error: " + getLastErrorString());
+    }
+
+    // Contrast
+    monitor.contrastOK = GetMonitorContrast(handle, &monitor.contrastMin, &monitor.contrast, &monitor.contrastMax);
+    d("-- -- GetMonitorContrast: " + std::to_string(monitor.contrastOK) + ": " + std::to_string(monitor.contrast) + " (" + std::to_string(monitor.contrastMin) + "-" + std::to_string(monitor.contrastMax) + ")");
+
+    if(monitor.contrastOK == 0) {
+        d("-- -- Error: " + getLastErrorString());
+    }
+
+    return monitor;
+}
+
+std::string
+getCapabilitiesString(HANDLE handle)
+{
+    DWORD cchStringLength = 0;
+    BOOL bSuccess = 0;
+
+    std::string returnString = "";
+
+    if(handle == NULL) {
+        d("No handle for capabilities string!");
+        return "";
+    }
+
+    if(handle != NULL) {
+        // Get the capabilities string length.
+        // Checking the capabilities string is, apparently, very flaky.
+        // So if it fails, we should try again.
+        int attempt = 0;
+        bSuccess = 0;
+        while (bSuccess != 1 && attempt < 3) {
+            if(attempt > 1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            attempt++;
+            bSuccess = GetCapabilitiesStringLength(handle,
+              &cchStringLength);
+            d("== cLength attempt #" + std::to_string(attempt) + ": " + std::to_string(bSuccess));
+        }
+
+        if (bSuccess != 1) {
+            d("Couldn't get capabilities length!");
+            return ""; // Does not respond to DDC/CI
+        }
+    }
+
+    d("== cLength: " + std::to_string(cchStringLength));
+
+    if (cchStringLength == 0) {
+        return "";
+    }
+
+    // Allocate the string buffer.
+    std::vector<char> capabilitiesBuffer(cchStringLength);
+
+    // Get the capabilities string.
+    // We know it exists, so we'll try a few times if needed.
+    int attempt = 0;
+    bSuccess = 0;
+    while (bSuccess != 1 && attempt < 5) {
+        if(attempt > 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        attempt++;
+        bSuccess = CapabilitiesRequestAndCapabilitiesReply(
+          handle, capabilitiesBuffer.data(), cchStringLength);
+        d("== cString attempt #" + std::to_string(attempt) + ": " + std::to_string(bSuccess));
+    }
+
+    if (bSuccess != 1) {
+        d("Couldn't get capabilities string!");
+        return ""; // Does not respond to DDC/CI
+    }
+
+    returnString = std::string(capabilitiesBuffer.data());
+
+    return returnString;
+}
+
+// Test if HANDLE has a working DDC/CI connection.
+// Returns "invalid", "ok", or a capabilities string.
+std::string
+getPhysicalHandleResults(HANDLE handle, std::string validationMethod)
+{
+    if (validationMethod == "no-validation")
+        return "ok";
+
+    BOOL bSuccess = 0;
+
+    // Accurate method: Check capabilities string
+    if (validationMethod == "accurate") {
+        std::string result = getCapabilitiesString(handle);
+        if(result == "") {
+            return "invalid";
+        }
+        return result;
+    }
+
+    // Fast method: Check common VCP codes
+    DWORD currentValue;
+    DWORD maxValue;
+
+    // 0x02, New Control Value
+    if (GetVCPFeatureAndVCPFeatureReply(
+          handle, 0x02, NULL, &currentValue, &maxValue)) {
+        bSuccess = 1;
+        return "ok";
+    }
+    // 0xDF, VCP Version
+    if (!bSuccess
+        && GetVCPFeatureAndVCPFeatureReply(
+          handle, 0xDF, NULL, &currentValue, &maxValue)) {
+        bSuccess = 1;
+        return "ok";
+    }
+    // 0x10, Brightness (usually)
+    if (!bSuccess
+        && GetVCPFeatureAndVCPFeatureReply(
+          handle, 0x10, NULL, &currentValue, &maxValue)) {
+        bSuccess = 1;
+        return "ok";
+    }
+
+    if (bSuccess == 0) {
+        return "invalid";
+    }
+
+    return "ok";
+}
+
+// Old method of detecting DDC/CI handles
+void
+populateHandlesMapLegacy()
+{
+    clearMonitorData();
+
+    std::vector<struct Monitor> monitors = getAllHandles();
+
+    try {
+    DISPLAY_DEVICE adapterDev;
+    adapterDev.cb = sizeof(DISPLAY_DEVICE);
+
+    // Loop through adapters
+    int adapterDevIndex = 0;
+    while (EnumDisplayDevices(NULL, adapterDevIndex++, &adapterDev, 0)) {
+        DISPLAY_DEVICE displayDev;
+        displayDev.cb = sizeof(DISPLAY_DEVICE);
+
+        // Loop through displays (with device ID) on each adapter
+        int displayDevIndex = 0;
+        while (EnumDisplayDevices(adapterDev.DeviceName,
+                                  displayDevIndex++,
+                                  &displayDev,
+                                  EDD_GET_DEVICE_INTERFACE_NAME)) {
+
+            // Check valid target
+            if (!(displayDev.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)
+                || displayDev.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) {
+                continue;
+            }
+
+            for (auto& monitor : monitors) {
+                MONITORINFOEX monitorInfo;
+                monitorInfo.cbSize = sizeof(MONITORINFOEX);
+                GetMonitorInfo(monitor.handle, &monitorInfo);
+
+                for (size_t i = 0; i < monitor.physicalHandles.size(); i++) {
+                    /**
+                     * Re-create DISPLAY_DEVICE.DeviceName with
+                     * MONITORINFOEX.szDevice and monitor index.
+                     */
+                    std::string monitorName =
+                      static_cast<std::string>(monitorInfo.szDevice)
+                      + "\\Monitor" + std::to_string(i);
+
+                    std::string deviceName =
+                      static_cast<std::string>(displayDev.DeviceName);
+
+                    std::string deviceID =
+                      static_cast<std::string>(displayDev.DeviceID);
+                    std::string deviceKey =
+                      deviceID.substr(0, deviceID.find("#{"));
+
+                    // Match and store against device ID
+                    if (monitorName == deviceName) {
+                        auto inserted = handles.insert(
+                          { static_cast<std::string>(deviceKey),
+                            monitor.physicalHandles[i] });
+                        if (inserted.second) {
+                            // Ownership moves to `handles`.
+                            monitor.physicalHandles[i] = NULL;
+                        }
+
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Destroy handles which could not be matched to a DISPLAY_DEVICE.
+    destroyPhysicalMonitorHandles(monitors);
+
+    // Also update physicalMonitorHandles for use with getAllDisplays
+    std::map<std::string, DisplayDevice> displays = getAllDisplays("key");
+
+    for (auto const& handle : handles) {
+        PhysicalMonitor newMonitor;
+        newMonitor.handle = handle.second;
+        newMonitor.ddcciSupported = true;
+
+        auto it = displays.find(handle.first);
+        if (it != displays.end()) {
+            newMonitor.name = it->second.deviceName.substr(
+              0, it->second.deviceName.find("Monitor"));
+            newMonitor.fullName = it->second.deviceName;
+            newMonitor.deviceKey = it->second.deviceKey;
+            newMonitor.deviceID = it->second.deviceID;
+        }
+
+        physicalMonitorHandles.insert({ handle.first, newMonitor });
+    }
+    } catch (...) {
+        // Any handles not yet transferred into `handles` (destroy is a
+        // no-op for ones already moved, since their slot was set to NULL).
+        destroyPhysicalMonitorHandles(monitors);
+        throw;
+    }
+}
+
+void
+populateHandlesMapNormal(std::string validationMethod, bool usePreviousResults, bool checkHighLevel)
+{
+    std::map<std::string, HANDLE> newHandles;
+    std::map<std::string, PhysicalMonitor> newPhysicalHandles;
+    std::set<HANDLE> newlyAcquiredHandles;
+
+    d("Getting all display devices...");
+
+    std::vector<DisplayDevice> displaysInEnumerationOrder;
+    std::map<std::string, DisplayDevice> displays =
+      getAllDisplays("name", &displaysInEnumerationOrder);
+    for (auto const& display : displays) {
+        d("-- Display: " + display.first);
+        d("-- -- deviceName: " + display.second.deviceName);
+        d("-- -- deviceID: " + display.second.deviceID);
+        d("-- -- deviceKey: " + display.second.deviceKey);
+    }
+
+    std::vector<DisplayConfigTarget> targets = getDisplayConfigTargets();
+    std::set<std::string> claimedDeviceKeys;
+    for (auto const& target : targets) {
+        d("-- Target: " + target.gdiDeviceName);
+        d("-- -- devicePath: " + target.devicePath);
+        d("-- -- friendlyName: " + target.friendlyName);
+    }
+
+    p("Testing all physicalMonitors...");
+
+    // Get physical monitor handles
+    std::vector<struct Monitor> monitors = getAllHandles();
+    try {
+    for (auto& monitor : monitors) {
+        for (size_t i = 0; i < monitor.physicalHandles.size(); i++) {
+
+            /**
+             * Loop through physical monitors, check capabilities,
+             * and only include ones that work.
+             */
+
+            std::string fullMonitorName =
+              monitor.monitorName + "\\" + "Monitor" + std::to_string(i);
+
+            p("-- " + fullMonitorName);
+
+            PhysicalMonitor newMonitor;
+            HANDLE acquiredHandle = monitor.physicalHandles[i];
+            newMonitor.handle = acquiredHandle;
+            newMonitor.handleIsValid = (newMonitor.handle != NULL);
+            newMonitor.name = monitor.monitorName;
+            newMonitor.physicalName = fullMonitorName;
+            newMonitor.ddcciSupported = false;
+
+            // Prefer an unambiguous description match. The physical-monitor
+            // and QueryDisplayConfig APIs do not document a shared ordering.
+            bool foundMatchingDisplay = false;
+            const std::string& physicalDescription =
+              monitor.physicalDescriptions[i];
+            if (!physicalDescription.empty()) {
+                p("-- -- Physical description: " + physicalDescription);
+            }
+
+            auto useTarget = [&](const DisplayConfigTarget& target,
+                                 const std::string& method) {
+                newMonitor.deviceKey = target.deviceKey;
+                newMonitor.deviceID = target.devicePath;
+                newMonitor.fullName =
+                  monitor.monitorName + "\\Monitor" + std::to_string(i);
+
+                // Preserve the canonical DISPLAY_DEVICE identifiers when
+                // available so settings keys and cached results remain stable.
+                for (auto const& display : displays) {
+                    if (display.second.deviceKey == target.deviceKey) {
+                        newMonitor.fullName = display.second.deviceName;
+                        newMonitor.deviceID = display.second.deviceID;
+                        break;
+                    }
+                }
+
+                claimedDeviceKeys.insert(target.deviceKey);
+                foundMatchingDisplay = true;
+                p("-- -- Matched with (" + method + "): " + target.deviceKey);
+            };
+
+            size_t physicalDescriptionCount = 0;
+            for (auto const& description : monitor.physicalDescriptions) {
+                if (description == physicalDescription) {
+                    physicalDescriptionCount++;
+                }
+            }
+
+            if (!physicalDescription.empty() && physicalDescriptionCount == 1) {
+                const DisplayConfigTarget* descriptionTarget = nullptr;
+                size_t descriptionTargetCount = 0;
+                for (auto const& target : targets) {
+                    if (target.gdiDeviceName == monitor.monitorName
+                        && target.friendlyName == physicalDescription) {
+                        descriptionTarget = &target;
+                        descriptionTargetCount++;
+                    }
+                }
+
+                if (descriptionTargetCount == 1
+                    && claimedDeviceKeys.find(descriptionTarget->deviceKey)
+                      == claimedDeviceKeys.end()) {
+                    useTarget(*descriptionTarget, "description");
+                } else if (descriptionTargetCount > 1) {
+                    p("-- -- Description match is ambiguous. Using fallback.");
+                }
+            }
+
+            /**
+             * Fall back to matching against the DISPLAY_DEVICE list by
+             * enumeration order. Physical monitors have been observed to
+             * follow this order; QueryDisplayConfig paths may not (e.g.
+             * duplicated displays).
+             * For example, if all DISPLAY_DEVICE includes:
+             * - \\.\DISPLAY1\Monitor1
+             * - \\.\DISPLAY2\Monitor0
+             * - \\.\DISPLAY2\Monitor2
+             *
+             * And the physical monitor name is \\.\DISPLAY2...
+             * And we're on physical monitor index 1 ("i == 1")...
+             * ...then we want \\.\DISPLAY2\Monitor2 because it is index 1 of the "\\.\DISPLAY2" DISPLAY_DEVICEs.
+            */
+            if(!foundMatchingDisplay) {
+                size_t foundCount = 0;
+                for (auto const& display : displaysInEnumerationOrder) {
+                    // Match with display number (e.g. "\\.\DISPLAY2")
+                    if(display.adapterName == monitor.monitorName) {
+                        if(foundCount == i) {
+                            if(claimedDeviceKeys.find(display.deviceKey)
+                               != claimedDeviceKeys.end()) {
+                                p("-- -- DISPLAY_DEVICE is already claimed. Using fallback.");
+                                break;
+                            }
+                            newMonitor.deviceKey = display.deviceKey;
+                            newMonitor.deviceID = display.deviceID;
+                            newMonitor.fullName = display.deviceName;
+                            claimedDeviceKeys.insert(display.deviceKey);
+                            foundMatchingDisplay = true;
+                            p("-- -- Matched with (fallback): " + display.deviceKey);
+                            break;
+                        }
+                        foundCount++;
+                    }
+                }
+            }
+
+            // QueryDisplayConfig provides the target DevicePath, but no
+            // documented ordering relation with physical-monitor handles.
+            // Keep its positional match as a best-effort fallback only.
+            if (!foundMatchingDisplay) {
+                size_t foundCount = 0;
+                for (auto const& target : targets) {
+                    if (target.gdiDeviceName == monitor.monitorName) {
+                        if (foundCount == i) {
+                            if (claimedDeviceKeys.find(target.deviceKey)
+                                == claimedDeviceKeys.end()) {
+                                useTarget(target, "QDC index fallback");
+                            } else {
+                                p("-- -- QDC target is already claimed.");
+                            }
+                            break;
+                        }
+                        foundCount++;
+                    }
+                }
+            }
+
+            if(!foundMatchingDisplay) {
+                // Skip just this physical monitor; the remaining ones on
+                // this HMONITOR may still match.
+                p("-- -- Couldn't find match. Skipping.");
+                continue;
+            }
+
+            // Check if monitor was previously tested and supported
+            if(usePreviousResults) {
+                for (auto const& previousDisplay : physicalMonitorHandles) {
+                    if(previousDisplay.second.fullName == newMonitor.fullName && previousDisplay.second.deviceID == newMonitor.deviceID && previousDisplay.second.ddcciSupported && previousDisplay.second.result != "invalid") {
+                        newMonitor.result = previousDisplay.second.result;
+                        newMonitor.ddcciSupported = previousDisplay.second.ddcciSupported;
+                        
+                        // Test old handle if it's valid
+                        if(previousDisplay.second.handle != NULL && previousDisplay.second.handleIsValid) {
+                            p("-- -- Testing old handle.");
+                             if("ok" == getPhysicalHandleResults(previousDisplay.second.handle, "fast")) {
+                                 p("-- -- Using old handle.");
+                                DestroyPhysicalMonitor(acquiredHandle);
+                                monitor.physicalHandles[i] = NULL;
+                                 newMonitor.handle = previousDisplay.second.handle;
+                                newMonitor.handleIsValid = previousDisplay.second.handleIsValid;
+                                newMonitor.hlCapabilities = previousDisplay.second.hlCapabilities;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Test high level capabilities
+            if((newMonitor.hlCapabilities.brightnessOK || newMonitor.hlCapabilities.contrastOK) == false) {
+                if(checkHighLevel) {
+                    p("-- -- High Level: Checking...");
+                    newMonitor.hlCapabilities = getHighLevelCapabilities(newMonitor.handle);
+                } else {
+                    p("-- -- High Level: Skipped");
+                }
+            }
+            if(newMonitor.hlCapabilities.brightnessOK || newMonitor.hlCapabilities.contrastOK) {
+                p("-- -- High Level: Supported");
+            }
+
+            // Test DDC/CI
+            bool saveCapabilities = false;
+            if (newMonitor.ddcciSupported == false) {
+                std::string result = "invalid";
+                if (capabilities.find(newMonitor.deviceKey) == capabilities.end()) {
+                    // Capabilities string not found, read it
+
+                    // If "accurate", check "fast" first
+                    if(validationMethod == "accurate") {
+                        result = getPhysicalHandleResults(newMonitor.handle, "fast");
+                    }
+
+                    // Check results using requested method
+                    std::string validationMethodResult = getPhysicalHandleResults(newMonitor.handle, validationMethod);
+
+                    if(validationMethodResult != "invalid") {
+                        result = validationMethodResult;
+                    }
+
+                    saveCapabilities = true;
+                } else {
+                    // Reuse capabilities string
+                    result = capabilities.find(newMonitor.deviceKey)->second;
+                    p("-- -- Using previous capabilities string.");  
+                }
+
+                newMonitor.result = result;
+                p("-- -- DDC/CI: " + result);                
+
+                if (result == "invalid") {
+                    newMonitor.ddcciSupported = false;
+                } else {
+                    newMonitor.ddcciSupported = true;
+                }
+            } else {
+                p("-- -- DDC/CI: previously OK");
+            }
+
+            // Add to monitor list. The physical handle is either transferred
+            // to `handles`, or the newly acquired handle was destroyed above
+            // when an existing handle was reused.
+            auto inserted = newHandles.insert(
+              { newMonitor.deviceKey, newMonitor.handle });
+            if (!inserted.second) {
+                if (newMonitor.handle == acquiredHandle) {
+                    DestroyPhysicalMonitor(acquiredHandle);
+                    monitor.physicalHandles[i] = NULL;
+                }
+                continue;
+            }
+            if (newMonitor.handle == acquiredHandle) {
+                newlyAcquiredHandles.insert(acquiredHandle);
+                monitor.physicalHandles[i] = NULL;
+            }
+            newPhysicalHandles.insert({ newMonitor.fullName, newMonitor });
+
+            // Add to capabilities list
+            if (saveCapabilities && validationMethod == "accurate" && newMonitor.result != "ok"
+                && newMonitor.result != "invalid") {
+                capabilities.insert(
+                    { newMonitor.deviceKey, newMonitor.result });
+            }
+        }
+    }
+
+    // All remaining entries were not transferred to `handles`.
+    destroyPhysicalMonitorHandles(monitors);
+
+    cleanMonitorHandles(newHandles);
+    // swap() is noexcept, unlike copy-assignment, so there's no window
+    // between committing `handles` and `physicalMonitorHandles` where an
+    // exception (e.g. bad_alloc) could leave a handle already visible in
+    // the committed global map while the catch below destroys it.
+    handles.swap(newHandles);
+    physicalMonitorHandles.swap(newPhysicalHandles);
+    } catch (...) {
+        // Keep the old global maps intact when refresh fails, and release any
+        // new handles whose ownership had been transferred to local state.
+        for (auto const& handle : newlyAcquiredHandles) {
+            DestroyPhysicalMonitor(handle);
+        }
+        destroyPhysicalMonitorHandles(monitors);
+        throw;
+    }
+}
+
+void
+populateHandlesMap(std::string validationMethod, bool usePreviousResults, bool checkHighLevel)
+{
+    try {
+        if (validationMethod == "legacy")
+            return populateHandlesMapLegacy();
+
+        if (validationMethod == "accurate" || validationMethod == "no-validation")
+            return populateHandlesMapNormal(validationMethod, usePreviousResults, checkHighLevel);
+
+        return populateHandlesMapNormal("fast", usePreviousResults, checkHighLevel);
+    } catch (...) {
+        p("populateHandlesMap: refresh failed. Keeping previous monitor data.");
+    }
+}
+
+Napi::Value
+refresh(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 2) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString() || !info[1].IsBoolean() || !info[2].IsBoolean()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    try {
+        populateHandlesMap(info[0].As<Napi::String>().Utf8Value(), info[1].As<Napi::Boolean>().ToBoolean(), info[2].As<Napi::Boolean>().ToBoolean());
+    } catch (...) {
+        throw Napi::Error::New(env, "Error refreshing DDC/CI displays!");
+    }
+
+    return env.Undefined();
+}
+
+void
+clearDisplayCache(const Napi::CallbackInfo& info)
+{
+    if (!physicalMonitorHandles.empty()) {
+        physicalMonitorHandles.clear();
+    }
+    if (!capabilities.empty()) {
+        capabilities.clear();
+    }
+}
+
+Napi::String
+getNAPICapabilitiesString(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 1) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    std::string monitorName = info[0].As<Napi::String>().Utf8Value();
+    PhysicalMonitor* physicalMonitor = findPhysicalMonitor(monitorName);
+    const std::string cacheKey = (physicalMonitor != nullptr
+      && !physicalMonitor->deviceKey.empty())
+      ? physicalMonitor->deviceKey
+      : monitorName;
+
+    // Check if it's already saved in memory first.
+    auto found = capabilities.find(cacheKey);
+    if (found != capabilities.end()) {
+        applyCapabilitiesResult(physicalMonitor, found->second);
+        return Napi::String::New(env, found->second);
+    }
+
+    // Find requested monitor.
+    auto it = handles.find(cacheKey);
+    if (it == handles.end()) {
+        it = handles.find(monitorName);
+    }
+    if (it == handles.end()) {
+        throw Napi::Error::New(env, "Monitor not found");
+    }
+
+    std::string returnString = getCapabilitiesString(it->second);
+
+    if(returnString == "") {
+        throw Napi::Error::New(
+          env, "Monitor not responding."); // Does not respond to DDC/CI
+    }
+
+    // A capabilities request can be performed after a fast discovery pass.
+    // Persist it in both native caches so later refreshes and input discovery
+    // observe the enriched state without another hardware request.
+    applyCapabilitiesResult(physicalMonitor, returnString);
+    if (physicalMonitor == nullptr) {
+        capabilities[cacheKey] = returnString;
+    }
+
+    return Napi::String::New(env, returnString);
+}
+
+
+Napi::Array
+getMonitorList(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+    Napi::Array ret = Napi::Array::New(env, handles.size());
+
+    int i = 0;
+    for (auto const& handle : handles) {
+        ret.Set(i++, handle.first);
+    }
+
+    return ret;
+}
+
+Napi::Array
+getAllMonitors(const Napi::CallbackInfo& info)
+{
+    napi_env env = info.Env();
+    Napi::Array monitors = Napi::Array::New(env);
+
+    int i = 0;
+    for (auto const& handle : physicalMonitorHandles) {
+        Napi::Object monitor = Napi::Object::New(env);
+        monitor.Set("ddcciSupported",
+                    Napi::Boolean::New(env, handle.second.ddcciSupported));
+        monitor.Set("hlBrightnessSupported",
+                    Napi::Boolean::New(env, handle.second.hlCapabilities.brightnessOK));
+        monitor.Set("hlContrastSupported",
+                    Napi::Boolean::New(env, handle.second.hlCapabilities.contrastOK));
+        monitor.Set("handleIsValid",
+                    Napi::Boolean::New(env, handle.second.handleIsValid));
+        monitor.Set("name", Napi::String::New(env, handle.second.name));
+        monitor.Set("fullName", Napi::String::New(env, handle.second.fullName));
+        monitor.Set("physicalName", Napi::String::New(env, handle.second.physicalName));
+        monitor.Set("result", Napi::String::New(env, handle.second.result));
+        monitor.Set("deviceKey",
+                    Napi::String::New(env, handle.second.deviceKey));
+        monitor.Set("deviceID", Napi::String::New(env, handle.second.deviceID));
+
+        monitors.Set(i++, monitor);
+    }
+
+    return monitors;
+}
+
+
+Napi::Value
+setVCP(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 3) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString() || !info[1].IsNumber() || !info[2].IsNumber()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    std::string monitorName = info[0].As<Napi::String>().Utf8Value();
+    BYTE vcpCode = static_cast<BYTE>(info[1].As<Napi::Number>().Int32Value());
+    DWORD newValue =
+      static_cast<DWORD>(info[2].As<Napi::Number>().Int32Value());
+
+    auto it = handles.find(monitorName);
+    if (it == handles.end()) {
+        throw Napi::Error::New(env, "Monitor not found");
+    }
+
+    DWORD errorCode = ERROR_SUCCESS;
+    BOOL ok = tryDdcCiOperation(
+      [&]() { return SetVCPFeature(it->second, vcpCode, newValue); },
+      errorCode);
+    if (!ok) {
+        throwDdcCiError(env, "Failed to set VCP code value", errorCode);
+    }
+
+    return env.Undefined();
+}
+
+Napi::Value
+getVCP(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 2) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString() || !info[1].IsNumber()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    std::string monitorName = info[0].As<Napi::String>().Utf8Value();
+    BYTE vcpCode = static_cast<BYTE>(info[1].As<Napi::Number>().Int32Value());
+
+    auto it = handles.find(monitorName);
+    if (it == handles.end()) {
+        throw Napi::Error::New(env, "Monitor not found");
+    }
+
+    DWORD currentValue;
+    DWORD maxValue;
+    DWORD errorCode = ERROR_SUCCESS;
+    BOOL ok = tryDdcCiOperation(
+      [&]() {
+          return GetVCPFeatureAndVCPFeatureReply(
+            it->second, vcpCode, NULL, &currentValue, &maxValue);
+      },
+      errorCode);
+    if (!ok) {
+        throwDdcCiError(env, "Failed to get VCP code value", errorCode);
+    }
+
+    Napi::Array ret = Napi::Array::New(env, 2);
+    ret.Set((uint32_t)0, static_cast<double>(currentValue));
+    ret.Set((uint32_t)1, static_cast<double>(maxValue));
+
+    return ret;
+}
+
+Napi::Boolean
+saveCurrentSettings(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 1) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    std::string monitorName = info[0].As<Napi::String>().Utf8Value();
+
+    auto it = handles.find(monitorName);
+    if (it == handles.end()) {
+        throw Napi::Error::New(env, "Monitor not found");
+    }
+
+
+    BOOL bSuccess = 0;
+    bSuccess = SaveCurrentSettings(it->second);
+
+    return Napi::Boolean::New(env, bSuccess);
+}
+
+Napi::Value
+getHighLevelBrightness(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 1) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    std::string monitorName = info[0].As<Napi::String>().Utf8Value();
+
+    auto it = handles.find(monitorName);
+    if (it == handles.end()) {
+        throw Napi::Error::New(env, "Monitor not found");
+    }
+
+    DWORD minValue;
+    DWORD currentValue;
+    DWORD maxValue;
+    DWORD errorCode = ERROR_SUCCESS;
+    BOOL ok = tryDdcCiOperation(
+      [&]() {
+          return GetMonitorBrightness(
+            it->second, &minValue, &currentValue, &maxValue);
+      },
+      errorCode);
+    if (!ok) {
+        throwDdcCiError(env, "Failed to get high level brightness", errorCode);
+    }
+
+    Napi::Array ret = Napi::Array::New(env, 3);
+    ret.Set((uint32_t)0, static_cast<double>(currentValue));
+    ret.Set((uint32_t)1, static_cast<double>(maxValue));
+    ret.Set((uint32_t)2, static_cast<double>(minValue));
+
+    return ret;
+}
+
+Napi::Value
+setHighLevelBrightness(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 2) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString() || !info[1].IsNumber()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    std::string monitorName = info[0].As<Napi::String>().Utf8Value();
+    DWORD newValue =
+      static_cast<DWORD>(info[1].As<Napi::Number>().Int32Value());
+
+    auto it = handles.find(monitorName);
+    if (it == handles.end()) {
+        throw Napi::Error::New(env, "Monitor not found");
+    }
+
+    DWORD errorCode = ERROR_SUCCESS;
+    BOOL ok = tryDdcCiOperation(
+      [&]() { return SetMonitorBrightness(it->second, newValue); }, errorCode);
+    if (!ok) {
+        throwDdcCiError(env, "Failed to set high level brightness", errorCode);
+    }
+
+    return env.Undefined();
+}
+
+Napi::Value
+getHighLevelContrast(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 1) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    std::string monitorName = info[0].As<Napi::String>().Utf8Value();
+
+    auto it = handles.find(monitorName);
+    if (it == handles.end()) {
+        throw Napi::Error::New(env, "Monitor not found");
+    }
+
+    DWORD minValue;
+    DWORD currentValue;
+    DWORD maxValue;
+    DWORD errorCode = ERROR_SUCCESS;
+    BOOL ok = tryDdcCiOperation(
+      [&]() {
+          return GetMonitorContrast(
+            it->second, &minValue, &currentValue, &maxValue);
+      },
+      errorCode);
+    if (!ok) {
+        throwDdcCiError(env, "Failed to get high level contrast", errorCode);
+    }
+
+    Napi::Array ret = Napi::Array::New(env, 3);
+    ret.Set((uint32_t)0, static_cast<double>(currentValue));
+    ret.Set((uint32_t)1, static_cast<double>(maxValue));
+    ret.Set((uint32_t)2, static_cast<double>(minValue));
+
+    return ret;
+}
+
+Napi::Value
+setHighLevelContrast(const Napi::CallbackInfo& info)
+{
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 2) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsString() || !info[1].IsNumber()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    std::string monitorName = info[0].As<Napi::String>().Utf8Value();
+    DWORD newValue =
+      static_cast<DWORD>(info[1].As<Napi::Number>().Int32Value());
+
+    auto it = handles.find(monitorName);
+    if (it == handles.end()) {
+        throw Napi::Error::New(env, "Monitor not found");
+    }
+
+    DWORD errorCode = ERROR_SUCCESS;
+    BOOL ok = tryDdcCiOperation(
+      [&]() { return SetMonitorContrast(it->second, newValue); }, errorCode);
+    if (!ok) {
+        throwDdcCiError(env, "Failed to set high level contrast", errorCode);
+    }
+
+    return env.Undefined();
+}
+
+void
+setLogLevel(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 1) {
+        throw Napi::TypeError::New(env, "Not enough arguments");
+    }
+    if (!info[0].IsNumber()) {
+        throw Napi::TypeError::New(env, "Invalid arguments");
+    }
+
+    logLevel = (int)info[0].ToNumber();
+}
+
+Napi::Array
+getMonitorInputs(const Napi::CallbackInfo& info)
+{
+    napi_env env = info.Env();
+    
+    if (info.Length() < 1) {
+        Napi::TypeError::New(env, "Monitor key required").ThrowAsJavaScriptException();
+        return Napi::Array::New(env);
+    }
+    
+    std::string searchKey = info[0].As<Napi::String>();
+
+    // Look up the monitor by any of its known keys
+    const PhysicalMonitor* foundMonitor = nullptr;
+
+    for (auto const& pair : physicalMonitorHandles) {
+        const PhysicalMonitor& monitor = pair.second;
+
+        if (pair.first == searchKey ||
+            monitor.name == searchKey ||
+            monitor.fullName == searchKey ||
+            monitor.physicalName == searchKey ||
+            monitor.deviceKey == searchKey ||
+            monitor.deviceID == searchKey) {
+            
+            foundMonitor = &monitor;
+            break;
+        }
+    }
+    
+    if (foundMonitor == nullptr) {
+        Napi::Error::New(env, "Monitor not found. Search key: " + searchKey).ThrowAsJavaScriptException();
+        return Napi::Array::New(env);
+    }
+    
+    const PhysicalMonitor& monitor = *foundMonitor;
+    std::string result = monitor.result;
+    
+    Napi::Array resultArray = Napi::Array::New(env);
+    
+    try {
+        // Find the input source list (VCP code 60) in the capabilities string
+        size_t inputStart = result.find("60(");
+        if (inputStart == std::string::npos) {
+            return resultArray;
+        }
+
+        size_t inputEnd = result.find(")", inputStart);
+        if (inputEnd == std::string::npos) {
+            return resultArray;
+        }
+
+        // Extract the substring containing the input source codes
+        std::string inputsStr = result.substr(inputStart + 3, inputEnd - inputStart - 3);
+
+        // Split into individual codes
+        std::vector<std::string> inputCodes;
+        std::istringstream iss(inputsStr);
+        std::string code;
+        
+        while (std::getline(iss, code, ' ')) {
+            if (!code.empty()) {
+                inputCodes.push_back(code);
+            }
+        }
+        
+        if (inputCodes.empty()) {
+            return resultArray;
+        }
+        
+        // Read the monitor's current input source, unless the caller just
+        // read it and passed it in.
+        DWORD currentInput = 0;
+        DWORD inputs = 0;
+        BOOL success = FALSE;
+        if (info.Length() > 1 && info[1].IsNumber()) {
+            currentInput = info[1].As<Napi::Number>().Uint32Value();
+            success = TRUE;
+        } else {
+            success = GetVCPFeatureAndVCPFeatureReply(
+                monitor.handle,
+                (BYTE)0x60,
+                NULL,
+                &currentInput,
+                &inputs
+            );
+        }
+
+        // Convert the current input to a number
+        unsigned int currentCodeValue = 0;
+        if (success) {
+            std::stringstream ss;
+            ss << std::hex << currentInput;
+            ss >> currentCodeValue;
+        }
+        
+        // Build the array of all available inputs (codes only)
+        Napi::Array availableInputs = Napi::Array::New(env);
+        int availableIndex = 0;
+
+        for (const auto& code : inputCodes) {
+            // Convert the hex string to a number
+            unsigned int codeValue;
+            std::stringstream ss;
+            ss << std::hex << code;
+            ss >> codeValue;
+            
+            availableInputs.Set(uint32_t(availableIndex++), Napi::Number::New(env, codeValue));
+        }
+        
+        // Return a two-element array: [current input, all available inputs]
+        resultArray.Set(uint32_t(0), Napi::Number::New(env, currentCodeValue));
+        resultArray.Set(uint32_t(1), availableInputs);
+        
+    } catch (const std::exception& e) {
+        Napi::Error::New(env, std::string("Error parsing monitor inputs: ") + e.what()).ThrowAsJavaScriptException();
+    }
+    
+    return resultArray;
+}
+
+
+Napi::Object
+Init(Napi::Env env, Napi::Object exports)
+{
+    exports.Set("getMonitorList",
+                Napi::Function::New(env, getMonitorList, "getMonitorList"));
+    exports.Set("getAllMonitors",
+                Napi::Function::New(env, getAllMonitors, "getAllMonitors"));
+    exports.Set(
+      "clearDisplayCache",
+      Napi::Function::New(env, clearDisplayCache, "clearDisplayCache"));
+    exports.Set("refresh", Napi::Function::New(env, refresh, "refresh"));
+    exports.Set("setVCP", Napi::Function::New(env, setVCP, "setVCP"));
+    exports.Set("getVCP", Napi::Function::New(env, getVCP, "getVCP"));
+    exports.Set(
+      "getCapabilitiesString",
+      Napi::Function::New(env, getNAPICapabilitiesString, "getCapabilitiesString"));
+    exports.Set(
+      "saveCurrentSettings",
+      Napi::Function::New(env, saveCurrentSettings, "saveCurrentSettings"));
+    exports.Set("getHighLevelBrightness", Napi::Function::New(env, getHighLevelBrightness, "getHighLevelBrightness"));
+    exports.Set("setHighLevelBrightness", Napi::Function::New(env, setHighLevelBrightness, "setHighLevelBrightness"));
+    exports.Set("getHighLevelContrast", Napi::Function::New(env, getHighLevelContrast, "getHighLevelContrast"));
+    exports.Set("setHighLevelContrast", Napi::Function::New(env, setHighLevelContrast, "setHighLevelContrast"));
+    exports.Set("setLogLevel", Napi::Function::New(env, setLogLevel, "setLogLevel"));
+    exports.Set("getMonitorInputs", Napi::Function::New(env, getMonitorInputs, "getMonitorInputs"));
+
+    // Preserve the original warm-up behavior without leaking its handles.
+    std::vector<struct Monitor> initialHandles = getAllHandles();
+    destroyPhysicalMonitorHandles(initialHandles);
+
+    return exports;
+}
+
+NODE_API_MODULE(NODE_GYP_MODULE_NAME, Init)

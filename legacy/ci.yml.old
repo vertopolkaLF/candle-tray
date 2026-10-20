@@ -1,0 +1,82 @@
+name: CI Build
+
+on: [push, pull_request]
+
+env:
+ BRANCH_NAME: ${{ github.head_ref || github.ref_name }} 
+
+jobs:
+  build:
+    name: Build all
+    runs-on: windows-2025
+
+    steps:
+      - uses: actions/checkout@v6
+        name: Read repository
+      
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: 'npm'
+          
+      - name: Get package.json info
+        id: info
+        uses: jaywcjlove/github-action-package@main
+          
+      - name: Prepare dependencies
+        run: npm i
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Build assets
+        run: npm run parcel-build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Build Win32 installer
+        run: npm exec electron-builder -- --x64 --config.extraMetadata.versionBuild="${{ steps.info.outputs.version }}+${{ github.sha }}" --config.win.artifactName="Twinkle.Tray.v${{ steps.info.outputs.version }}.exe" --publish="never"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - uses: actions/upload-artifact@v7
+        name: Upload Win32 installer
+        with:
+          name: twinkle-tray-exe-${{ steps.info.outputs.version }}-${{ github.sha }}
+          path: dist/*.exe
+
+      - name: Get current date
+        id: date
+        uses: Kaven-Universe/github-action-current-date-time@v1
+        with:
+          format: "YYYY.1MMDD.1HHmm"
+          
+      - name: Build x64 AppX
+        if: ${{ env.BRANCH_NAME == 'master' || env.BRANCH_NAME == 'ci-test' }}
+        run: npm exec electron-builder -- --x64 --win appx --config.npmRebuild=false --config.extraMetadata.versionBuild="${{ steps.info.outputs.version }}+${{ github.sha }}" --config.extraMetadata.version=${{ steps.date.outputs.time }} --config.extraMetadata.name=twinkle-tray-appx --config.win.artifactName="Twinkle.Tray.v${{ steps.info.outputs.version }}-store.appx" --publish="never"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - uses: actions/upload-artifact@v7
+        name: Upload x64 AppX
+        if: ${{ env.BRANCH_NAME == 'master' || env.BRANCH_NAME == 'ci-test' }}
+        with:
+          name: twinkle-tray-appx-x64-${{ steps.info.outputs.version }}-${{ github.sha }}
+          path: dist/*-store.appx
+          
+      - name: Build ARM64 Modules
+        if: ${{ env.BRANCH_NAME == 'master' || env.BRANCH_NAME == 'ci-test' }}
+        run: npx electron-rebuild --arch arm64 --types "prod"
+          
+      - name: Build ARM64 AppX
+        if: ${{ env.BRANCH_NAME == 'master' || env.BRANCH_NAME == 'ci-test' }}
+        run: npm exec electron-builder -- --arm64 --win appx --config.extraMetadata.versionBuild="${{ steps.info.outputs.version }}+${{ github.sha }}" --config.extraMetadata.version=${{ steps.date.outputs.time }} --config.extraMetadata.name=twinkle-tray-appx --config.win.artifactName="Twinkle.Tray.v${{ steps.info.outputs.version }}-store-arm64.appx" --config.npmRebuild=false --publish="never"
+        env:
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            
+      - uses: actions/upload-artifact@v7
+        name: Upload ARM64 AppX
+        if: ${{ env.BRANCH_NAME == 'master' || env.BRANCH_NAME == 'ci-test' }}
+        with:
+          name: twinkle-tray-appx-arm64-${{ steps.info.outputs.version }}-${{ github.sha }}
+          path: dist/*-store-arm64.appx

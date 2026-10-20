@@ -1,0 +1,301 @@
+const { ipcRenderer: ipc } = require('electron');
+
+function getArgumentVars() {
+    try {
+        const jsVarsString = process.argv.find(arg => arg.indexOf("jsVars") === 0)
+        const jsVars = JSON.parse(atob(jsVarsString.substring(6)))
+        return jsVars
+    } catch(e) {
+        return {}
+    }
+}
+
+function requestMonitors(fullRefresh = false) {
+    if (fullRefresh) {
+        ipc.send('full-refresh')
+    } else {
+        ipc.send('request-monitors')
+    }
+}
+
+function requestAccent() {
+    ipc.send('request-colors')
+}
+
+// Send brightness update request. Params are the monitor's index in the array and requested brightness level.
+function updateBrightness(index, level) {
+    ipc.send('update-brightness', {
+        index,
+        level
+    })
+}
+
+//
+// Send Settings
+// - Send immediately if no recent changes. Throttle if frequent changes.
+//
+//
+
+let sendSettingsThrottle = false
+let sendSettingsObj = {}
+function sendSettings(newSettings = {}) {
+    sendSettingsObj = Object.assign(sendSettingsObj, newSettings)
+    if (!sendSettingsThrottle) {
+        actuallySendSettings()
+        sendSettingsThrottle = setTimeout(() => {
+            actuallySendSettings()
+            sendSettingsThrottle = false
+        }, 500)
+    }
+}
+
+function sendSettingsImmediate(newSettings = {}) {
+    ipc.send('send-settings', {
+        newSettings,
+        sendUpdate: false
+    })
+}
+
+function actuallySendSettings() {
+    ipc.send('send-settings', {
+        newSettings: sendSettingsObj,
+        sendUpdate: true
+    })
+    sendSettingsObj = {}
+}
+
+function requestSettings() {
+    ipc.send('request-settings')
+}
+
+function resetSettings() {
+    ipc.send('reset-settings')
+}
+
+function requestDDCSafetyStatus() {
+    ipc.send('request-ddc-safety-status')
+}
+
+function retryDDCValidation() {
+    ipc.send('retry-ddc-validation')
+}
+
+function detectSunValley() {
+    if(!window.reactReady) return false;
+    try {
+        // Detect new Fluent Icons (Windows build 21327+)
+        if(window.settings.enableSunValley && document.fonts.check("12px Segoe Fluent Icons")) {
+            window.document.body.dataset.fluentIcons = true
+        } else {
+            window.document.body.dataset.fluentIcons = false
+        }
+        // Detect new system font (Windows build 21376+)
+        if(window.settings.enableSunValley && document.fonts.check("12px Segoe UI Variable Text")) {
+            window.document.body.dataset.segoeUIVariable = true
+        } else {
+            window.document.body.dataset.segoeUIVariable = false
+        }
+        // Detect Windows 11
+        window.document.body.dataset.isWin11 = (window.settings.isWin11 ? true : false)
+    } catch(e) {
+        console.log("Couldn't test for Sun Valley", e)
+    }
+}
+
+function openURL(url) {
+    ipc.send('open-url', url)
+}
+
+function getUpdate() {
+    ipc.send('get-update', window.latestVersion)
+    ipc.send('clear-update', window.latestVersion.version)
+}
+
+function checkForUpdates() {
+    ipc.send('check-for-updates')
+}
+
+window.reloadReactMonitors = function() { 
+    window.dispatchEvent(new CustomEvent('monitorsUpdated', {
+        detail: window.allMonitors
+    }))
+}
+
+// New app update recieved
+ipc.on('latest-version', (event, version) => {
+    window.latestVersion = version
+    window.dispatchEvent(new CustomEvent('updateUpdated', {
+        detail: version
+    }))
+})
+
+// Update download progress
+ipc.on('updateProgress', (event, progress) => {
+    window.dispatchEvent(new CustomEvent('updateProgress', {
+        detail: {
+            progress
+        }
+    }))
+})
+
+// Monitor info updated
+ipc.on("monitors-updated", (e, monitors) => {
+    if (JSON.stringify(window.allMonitors) == JSON.stringify(monitors)) return false;
+    window.allMonitors = monitors
+    window.lastUpdate = Date.now()
+    window.dispatchEvent(new CustomEvent('monitorsUpdated', {
+        detail: monitors
+    }))
+})
+
+// Accent colors recieved
+ipc.on('update-colors', (event, data) => {
+    window.document.body.style.setProperty("--system-accent-color", data.accent.hex)
+    window.document.body.style.setProperty("--system-accent-lighter", data.lighter)
+    window.document.body.style.setProperty("--system-accent-light", data.light)
+    window.document.body.style.setProperty("--system-accent-medium", data.medium)
+    window.document.body.style.setProperty("--system-accent-medium-dark", data.mediumDark)
+    window.document.body.style.setProperty("--system-accent-transparent", data.transparent)
+    window.document.body.style.setProperty("--system-accent-dark", data.dark)
+
+    window.document.body.style.setProperty("--system-accent-dark1", data.accentDark1.hex)
+    window.document.body.style.setProperty("--system-accent-dark2", data.accentDark2.hex)
+    window.document.body.style.setProperty("--system-accent-dark3", data.accentDark3.hex)
+    window.document.body.style.setProperty("--system-accent-light1", data.accentLight1.hex)
+    window.document.body.style.setProperty("--system-accent-light2", data.accentLight2.hex)
+    window.document.body.style.setProperty("--system-accent-light3", data.accentLight3.hex)
+    window.accent = data.accent.hex
+})
+
+ipc.on('settings-updated', (event, settings) => {
+    window.settings = settings
+    detectSunValley()
+    window.dispatchEvent(new CustomEvent('settingsUpdated', {
+        detail: settings
+    }))
+})
+
+ipc.on('native-brightness-key', (event, accelerator) => {
+    window.dispatchEvent(new CustomEvent('nativeBrightnessKey', {
+        detail: accelerator
+    }))
+})
+
+ipc.on('ddc-safety-status', (event, status) => {
+    window.dispatchEvent(new CustomEvent('ddcSafetyStatus', {
+        detail: status
+    }))
+})
+
+ipc.on('window-history', (event, history) => {
+    window.windowHistory = history
+    window.dispatchEvent(new CustomEvent('windowHistory', {
+        detail: history
+    }))
+})
+
+// Localization recieved
+ipc.on('localization-updated', (event, localization) => {
+    window.dispatchEvent(new CustomEvent('localizationUpdated', {
+        detail: localization
+    }))
+})
+
+const processTheme = (event, theme) => {
+    try {
+        window.theme = (theme.SystemUsesLightTheme == 0 ? "dark" : "light")
+        window.document.body.dataset["systemTheme"] = (theme.SystemUsesLightTheme == 0 ? "dark" : "light")
+        window.document.body.dataset["theme"] = (settings.theme == "dark" || settings.theme == "light" ? settings.theme : window.theme)
+        window.document.body.dataset["transparent"] = (theme.EnableTransparency == 0 || theme.UseAcrylic == 0 ? "false" : "true")
+        window.document.body.dataset["acrylic"] = (theme.UseAcrylic == 0 ? "false" : "true")
+
+        // Disable acrylic on W10 because it's buggy
+        if(!window.settings?.isWin11) {
+            window.document.body.dataset["transparent"] = false
+            window.document.body.dataset["acrylic"] = false
+        }
+
+        window.document.body.dataset["coloredTaskbar"] = (theme.ColorPrevalence == 0 ? "false" : "true")
+    } catch (e) {
+        window.document.body.dataset["systemTheme"] = "default"
+        window.document.body.dataset["theme"] = "dark"
+        window.document.body.dataset["transparent"] = "false"
+        window.document.body.dataset["acrylic"] = false
+        window.document.body.dataset["coloredTaskbar"] = "false"
+    }
+}
+
+// User personalization settings recieved
+ipc.on('theme-settings', processTheme)
+
+ipc.on('mica-wallpaper', (event, wallpaper) => {
+    // Native Mica is used instead on Windows 11 22H2+
+    if (window.document.body.dataset.nativeMica === "true") return;
+    const mica = document.querySelector("#mica .displays")
+    const micaIMG = document.querySelector("#mica img")
+    if(!wallpaper) {
+        mica.style.visibility = "hidden"
+    } else {
+        mica.style.visibility = "visible"
+        micaIMG.src = wallpaper.path
+        micaIMG.width = wallpaper.size?.width
+        micaIMG.height = wallpaper.size?.height
+    }
+})
+
+// Request startup data
+window.addEventListener("DOMContentLoaded", () => {
+    window.document.body.dataset.nativeMica = (getArgumentVars().useNativeMica ? "true" : "false")
+    processTheme(undefined, getArgumentVars().lastTheme)
+    requestSettings()
+    requestMonitors()
+    requestAccent()
+})
+
+// VCP code handling
+window.addEventListener("setVCP", e => {
+    const { monitor, code, value } = e.detail
+    ipc.send("set-vcp", { monitor, code, value })
+})
+
+window.addEventListener("set-sdr-brightness", e => {
+    const { monitor, value } = e.detail
+    ipc.send("set-sdr-brightness", { monitor, value })
+})
+
+const SunCalc = require('suncalc')
+function getSunCalcTimes(lat, long, offsetMinutes = 0) {
+    const localTimes = SunCalc.getTimes(new Date(), lat, long)
+    const offset = parseInt(offsetMinutes) || 0
+    for (const timeName in localTimes) {
+        const time = new Date(localTimes[timeName].getTime() + offset * 60000)
+        localTimes[timeName] = time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    }
+    return localTimes
+}
+
+window.ipc = ipc
+window.updateBrightness = updateBrightness
+window.requestMonitors = requestMonitors
+window.sendSettings = sendSettings
+window.sendSettingsImmediate = sendSettingsImmediate
+window.requestSettings = requestSettings
+window.resetSettings = resetSettings
+window.requestDDCSafetyStatus = requestDDCSafetyStatus
+window.retryDDCValidation = retryDDCValidation
+window.getUpdate = getUpdate
+window.checkForUpdates = checkForUpdates
+window.openURL = openURL
+window.allMonitors = []
+window.lastUpdate = Date.now()
+window.showPanel = false
+window.reactReady = false
+window.settings = getArgumentVars().settings
+window.accent = "cyan"
+window.getSunCalcTimes = getSunCalcTimes
+
+window.version = 'v' + getArgumentVars().appVersion
+window.versionTag = getArgumentVars().appVersionTag
+window.versionBuild = getArgumentVars().appBuild
+window.isAppX = (getArgumentVars().appName == "twinkle-tray-appx" ? true : false)
+window.settingsPath = getArgumentVars().settingsPath

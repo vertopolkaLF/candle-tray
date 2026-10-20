@@ -1,0 +1,188 @@
+import React, { useState, useEffect } from "react"
+import Slider from "./Slider"
+import TranslateReact from "../TranslateReact"
+import { displayLevel } from "./utilts/monitor.util"
+
+export default function MonitorInfo(props) {
+    const { monitor, name } = props
+    const [brightness, setBrightness] = useState(monitor?.features?.["0x10"] ? monitor?.features?.["0x10"][0] : 50)
+    const [contrast, setContrast] = useState(monitor?.features?.["0x12"] ? monitor?.features?.["0x12"][0] : 50)
+    const [volume, setVolume] = useState(monitor?.features?.["0x62"] ? monitor?.features?.["0x62"][0] : 50)
+    const [powerState, setPowerState] = useState(monitor?.features?.["0xD6"] ? monitor?.features?.["0xD6"][0] : 50)
+    const [sdr, setSDR] = useState(monitor.sdrLevel >= 0 ? monitor.sdrLevel : 50)
+    const [gamma, setGamma] = useState(monitor.gammaBrightness >= 0 ? monitor.gammaBrightness : 100)
+    const [manualVCP, setManualVCP] = useState("")
+    const [manualValue, setManualValue] = useState("")
+    const [T] = useState(new TranslateReact({}, {}))
+
+    let extraHTML = []
+
+    useEffect(() => {
+        window.addEventListener("localizationUpdated", (e) => T.setLocalizationData(e.detail.desired, e.detail.default))
+        window.ipc.send('request-localization')
+        return () => { }
+    }, [])
+
+    useEffect(() => {
+        if (monitor.gammaBrightness >= 0) setGamma(monitor.gammaBrightness)
+        return () => { }
+    }, [monitor.gammaBrightness])
+
+    if (props.debug === true) {
+        extraHTML.push(
+            <div key="debug">
+                <br />Raw Brightness: <b>{(monitor.type == "none" ? "Not supported" : displayLevel(monitor.brightnessRaw))}</b>
+                <br />Features: <b>{(monitor.type == "ddcci" && monitor.features ? JSON.stringify(monitor.features) : "Unsupported")}</b>
+                <br />Order: <b>{(monitor.order ? monitor.order : "0")}</b>
+                <br />Key: <b>{monitor.key}</b>
+                <br />ID: <b>{monitor.id}</b>
+                <br />Connection Type: <b>{monitor.connector}</b>
+                <br />Gamma Level: <b>{getGammaLevel(monitor)}</b>
+                <br /><br />
+            </div>
+        )
+    }
+
+    // Brightness
+    if (monitor?.features?.["0x10"]) {
+        extraHTML.push(
+            <div className="feature-row" key="brightness">
+                <div className="feature-icon"><span className="icon vfix">&#xE706;</span></div>
+                <Slider type="brightness" monitorID={monitor.id} level={brightness} monitorName={monitor.name} monitortype={monitor.type} onChange={val => { setBrightness(val); setVCP(monitor.id, 0x10, val * (monitor.features["0x10"][1] / 100)) }} scrolling={false} />
+            </div>
+        )
+    }
+
+    // Contrast
+    if (monitor?.features?.["0x12"]) {
+        extraHTML.push(
+            <div className="feature-row" key="contrast">
+                <div className="feature-icon"><span className="icon vfix">&#xE793;</span></div>
+                <Slider type="contrast" monitorID={monitor.id} level={contrast} monitorName={monitor.name} monitortype={monitor.type} onChange={val => { setContrast(val); setVCP(monitor.id, 0x12, val * (monitor.features["0x12"][1] / 100)) }} scrolling={false} />
+            </div>
+        )
+    }
+
+    // Volume
+    if (monitor?.features?.["0x62"]) {
+        extraHTML.push(
+            <div className="feature-row" key="volume">
+                <div className="feature-icon"><span className="icon vfix">&#xE767;</span></div>
+                <Slider type="volume" monitorID={monitor.id} level={volume} monitorName={monitor.name} monitortype={monitor.type} onChange={val => { setVolume(val); setVCP(monitor.id, 0x62, val * (monitor.features["0x62"][1] / 100)) }} scrolling={false} />
+            </div>
+        )
+    }
+
+    // Power State
+    if (monitor?.features?.["0xD6"]) {
+        extraHTML.push(
+            <div className="feature-row" key="powerState">
+                <div className="feature-icon"><span className="icon vfix">&#xE7E8;</span></div>
+                <Slider type="powerState" monitorID={monitor.id} level={powerState} monitorName={monitor.name} max={monitor.features["0xD6"][1]} monitortype={monitor.type} onChange={val => { setPowerState(val); setVCP(monitor.id, 0xD6, val) }} scrolling={false} />
+            </div>
+        )
+    }
+
+    // Manual VCP
+    extraHTML.push(
+        <div className="manual-vcp-row" key="manual">
+            <input placeholder="VCP code" value={manualVCP} onChange={e => { setManualVCP(e.target.value) }} />
+            <input placeholder="Value" value={manualValue} onChange={e => { setManualValue(e.target.value) }} />
+            <a className="button" onClick={() => setVCP(monitor.id, parseInt(manualVCP), parseInt(manualValue))}>Send VCP</a>
+        </div>
+    )
+
+    // Gamma ramp test. Only displays with a known device path can be adjusted.
+    if (props.debug === true && (monitor.softwarePath || monitor.path)) {
+        extraHTML.push(
+            <div className="feature-row" key="gamma">
+                <div className="feature-icon">&#x3B3;</div>
+                <Slider type="gamma" monitorID={monitor.id} level={gamma} monitorName={monitor.name} min={20} max={100} monitortype={monitor.type} onChange={val => { setGamma(val); setGammaBrightness(monitor.id, val) }} scrolling={false} />
+            </div>
+        )
+    }
+
+    // SDR test
+    extraHTML.push(
+        <div className="feature-row" key="sdrLevel">
+            <div className="feature-icon">SDR</div>
+            <Slider type="sdrLevel" monitorID={monitor.id} level={sdr} monitorName={monitor.name} max={100} monitortype={monitor.type} onChange={val => { setSDR(val); setSDRBrightness(monitor.id, val) }} scrolling={false} />
+        </div>
+    )
+
+    return (
+        <div key={monitor.key}>
+            <br />
+            <div className="sectionSubtitle"><div className="icon">&#xE7F4;</div><div>{monitor.name}</div></div>
+            <p>{T.t("SETTINGS_MONITORS_DETAILS_NAME")}: <b>{name}</b>
+                <br />{T.t("SETTINGS_MONITORS_DETAILS_INTERNAL_NAME")}: <b>{monitor.hwid[1]}</b>
+                <br />{T.t("SETTINGS_MONITORS_DETAILS_COMMUNICATION")}: {getDebugMonitorType((monitor.type === "ddcci" && monitor.highLevelSupported?.brightness ? "ddcci-hl" : monitor.type))}
+                <br />{T.t("SETTINGS_MONITORS_DETAILS_BRIGHTNESS")}: <b>{(monitor.type == "none" ? T.t("GENERIC_NOT_SUPPORTED") : displayLevel(monitor.brightness))}</b>
+                <br />{T.t("SETTINGS_MONITORS_DETAILS_MAX_BRIGHTNESS")}: <b>{(monitor.type !== "ddcci" && monitor.type !== "software" ? T.t("GENERIC_NOT_SUPPORTED") : monitor.brightnessMax)}</b>
+                <br />{T.t("SETTINGS_MONITORS_DETAILS_BRIGHTNESS_NORMALIZATION")}: <b>{(monitor.type == "none" ? T.t("GENERIC_NOT_SUPPORTED") : monitor.min + " - " + monitor.max)}</b>
+                <br />{T.t("SETTINGS_MONITORS_DETAILS_HDR")}: <b>{(monitor.hdr == "active" ? T.t("GENERIC_ACTIVE") : monitor.hdr == "supported" ? T.t("GENERIC_SUPPORTED") : T.t("GENERIC_UNSUPPORTED"))}</b>
+            </p>
+            {extraHTML}
+        </div>
+    )
+}
+
+function setVCP(monitor, code, value) {
+    window.dispatchEvent(new CustomEvent("setVCP", {
+        detail: {
+            monitor,
+            code,
+            value
+        }
+    }))
+}
+
+function setSDRBrightness(monitor, value) {
+    window.dispatchEvent(new CustomEvent("set-sdr-brightness", {
+        detail: {
+            monitor,
+            value
+        }
+    }))
+}
+
+function setGammaBrightness(monitor, value) {
+    window.ipc.send("set-gamma-brightness", { monitor, value })
+}
+
+// Mirrors gammaFeaturesActive() in Monitors.js, which decides whether ramps
+// are read at all. Without it, a display that was never queried looks broken.
+function gammaFeaturesActive() {
+    if (window.settings?.useSoftwareBrightnessFallback) return true
+    if (Object.values(window.settings?.gammaAsMainSliderDisplays || {}).some(enabled => enabled)) return true
+    if (Object.values(window.settings?.extendMinimumDisplays || {}).some(enabled => enabled)) return true
+    return false
+}
+
+function getGammaLevel(monitor) {
+    if (monitor.gammaBrightness >= 0) return displayLevel(monitor.gammaBrightness)
+
+    // No device path means the ramp can't be reached at all
+    if (!(monitor.softwarePath || monitor.path)) return "Unsupported"
+
+    // Ramps are only read while a gamma feature is switched on
+    return (gammaFeaturesActive() ? "Read failed" : "Not read")
+}
+
+function getDebugMonitorType(type) {
+    if (type == "none") {
+        return (<><b>None</b> <span className="icon red vfix">&#xEB90;</span></>)
+    } else if (type == "ddcci") {
+        return (<><b>DDC/CI</b> <span className="icon green vfix">&#xE73D;</span></>)
+    } else if (type == "ddcci-hl") {
+        return (<><b>DDC/CI (HL)</b> <span className="icon green vfix">&#xE73D;</span></>)
+    } else if (type == "wmi") {
+        return (<><b>WMI</b> <span className="icon green vfix">&#xE73D;</span></>)
+    } else if (type == "software") {
+        return (<><b>Software (Gamma)</b> <span className="icon green vfix">&#xE73D;</span></>)
+    } else if (type == "studio-display") {
+        return (<><b>Studio Display</b> <span className="icon green vfix">&#xE73D;</span></>)
+    } else {
+        return (<><b>Unknown ({type})</b> <span className="icon red vfix">&#xEB90;</span></>)
+    }
+}

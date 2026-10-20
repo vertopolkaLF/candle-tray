@@ -1,0 +1,2260 @@
+const tag = "\x1b[47m M \x1b[0m";
+const oLog = console.log
+console.log = (...args) => { args.unshift(tag); oLog(...args) }
+console.log("Monitors.js starting. If you see this again, something bad happened!")
+const w32disp = require("win32-displayconfig");
+const wmibridge = require("wmi-bridge");
+const hdr = require("windows-hdr");
+const { exec } = require('child_process');
+require("os").setPriority(0, require("os").constants.priority.PRIORITY_BELOW_NORMAL)
+
+let lastDDCCIList = []
+let lastRefresh = {}
+let lastWin32 = {}
+let lastWMI = {}
+let lastHDR = {}
+let softwareBrightnessAPI
+let softwareBrightnessUnavailable = false
+const SOFTWARE_BRIGHTNESS_MIN = 20
+
+function getSoftwareBrightnessAPI() {
+    if (softwareBrightnessAPI) return softwareBrightnessAPI
+    if (softwareBrightnessUnavailable) return false
+
+    try {
+        const windowsUtils = require("tt-windows-utils")
+        if (!windowsUtils?.DisplayBrightness?.getBrightness || !windowsUtils?.DisplayBrightness?.setBrightness) {
+            throw new Error("Display brightness native module is unavailable.")
+        }
+        softwareBrightnessAPI = windowsUtils.DisplayBrightness
+        return softwareBrightnessAPI
+    } catch (e) {
+        softwareBrightnessUnavailable = true
+        console.log("Software display brightness is unavailable.", e)
+        return false
+    }
+}
+
+function getSoftwareBrightness(monitor) {
+    const api = getSoftwareBrightnessAPI()
+    const path = monitor?.softwarePath || monitor?.path
+    if (!api || typeof path !== "string" || path.length === 0) return false
+
+    try {
+        const brightness = api.getBrightness(path)
+        if (typeof brightness !== "number" || !Number.isFinite(brightness) || brightness < 0) return false
+        return Math.max(SOFTWARE_BRIGHTNESS_MIN, Math.min(100, Math.round(brightness)))
+    } catch (e) {
+        console.log(`Couldn't read software brightness for ${path}`, e)
+        return false
+    }
+}
+
+// Reading a ramp means opening a device context per display, so it's only
+// worth doing when something actually uses the result.
+function gammaFeaturesActive() {
+    if (settings?.useSoftwareBrightnessFallback) return true
+    if (Object.values(settings?.gammaAsMainSliderDisplays || {}).some(enabled => enabled)) return true
+    if (Object.values(settings?.extendMinimumDisplays || {}).some(enabled => enabled)) return true
+    return false
+}
+
+// Gamma ramps are owned by Windows, not by us, so the level is read back on
+// every refresh instead of being assumed from the last value set.
+function readGammaBrightness(monitors) {
+    if (!gammaFeaturesActive() || !getSoftwareBrightnessAPI()) return;
+
+    const readPaths = {}
+    for (const hwid2 in monitors) {
+        const monitor = monitors[hwid2]
+        const path = monitor?.softwarePath || monitor?.path
+        if (typeof path !== "string" || path.length === 0) continue
+
+        // Displays can share a path (and therefore a gamma ramp)
+        const brightness = (readPaths[path] === undefined ? getSoftwareBrightness(monitor) : readPaths[path])
+        readPaths[path] = brightness
+        if (brightness === false) continue
+
+        updateDisplay(monitors, hwid2, {
+            softwarePath: path,
+            gammaBrightness: brightness
+        })
+    }
+}
+
+function applySoftwareBrightness(monitors) {
+    if (!settings?.useSoftwareBrightnessFallback) return;
+
+    const usedPaths = new Set()
+
+    for (const hwid2 in monitors) {
+        const monitor = monitors[hwid2]
+        const path = monitor?.softwarePath || monitor?.path
+        if (monitor?.type !== "none" || monitor?.hdr === "active" || typeof path !== "string" || path.length === 0 || usedPaths.has(path)) continue
+
+        const brightness = (monitor.gammaBrightness >= 0 ? monitor.gammaBrightness : getSoftwareBrightness(monitor))
+        if (brightness === false) continue
+
+        usedPaths.add(path)
+        updateDisplay(monitors, hwid2, {
+            type: "software",
+            softwarePath: path,
+            brightness,
+            brightnessRaw: brightness,
+            brightnessMax: 100,
+            brightnessValues: [brightness, 100],
+            brightnessType: false,
+            min: SOFTWARE_BRIGHTNESS_MIN,
+            max: 100
+        })
+    }
+}
+
+// Returns the level that was applied, or false if it couldn't be.
+function setSoftwareBrightness(monitor, brightness) {
+    const api = getSoftwareBrightnessAPI()
+    const path = monitor?.softwarePath || monitor?.path
+    const requested = Math.max(SOFTWARE_BRIGHTNESS_MIN, Math.min(100, Math.round(Number(brightness))))
+    if (!api || typeof path !== "string" || path.length === 0 || !Number.isFinite(requested)) return false
+
+    try {
+        if (!api.setBrightness(path, requested)) return false
+    } catch (e) {
+        console.log(`Couldn't set software brightness for ${path}`, e)
+        return false
+    }
+
+    // Track the level against every display sharing this ramp
+    for (const hwid2 in monitors) {
+        const other = monitors[hwid2]
+        if ((other?.softwarePath || other?.path) === path) other.gammaBrightness = requested
+    }
+    return requested
+}
+
+// Debug tool. Applies a gamma ramp to any display with a known path, even when
+// the fallback is disabled or the display has hardware brightness control.
+function setGammaBrightness(brightness, id) {
+    if (!monitors || !id) return false
+
+    const monitor = Object.values(monitors).find(mon => mon.id?.indexOf(id) >= 0)
+    if (!monitor) return false
+
+    const applied = setSoftwareBrightness(monitor, brightness)
+    if (applied === false) {
+        console.log(`Couldn't set gamma brightness for monitor ${monitor.id}`)
+        return false
+    }
+    return applied
+}
+
+// Reset gamma ramps when the fallback is turned off, so displays don't stay dimmed.
+function restoreSoftwareBrightness() {
+    if (!softwareBrightnessAPI || !monitors) return;
+
+    const usedPaths = new Set()
+    for (const hwid2 in monitors) {
+        const monitor = monitors[hwid2]
+        if (monitor?.type !== "software") continue
+        const path = monitor.softwarePath || monitor.path
+        if (typeof path !== "string" || path.length === 0 || usedPaths.has(path)) continue
+
+        usedPaths.add(path)
+        setSoftwareBrightness(monitor, 100)
+    }
+}
+
+function deepCopy(obj) {
+    try {
+        return JSON.parse(JSON.stringify(obj))
+    } catch(e) {
+        return false
+    }
+}
+
+async function handleMonitorMessage(data) {
+    try {
+        if (data.type === "refreshMonitors") {
+            if(data.clearCache) {
+                vcpCache = {}
+                monitorReports = {}
+                monitorReportsRaw = {}
+                monitorFeatureSnapshots = {}
+                invalidatedFeatureSnapshotMonitorIds.clear()
+            }
+            const results = await refreshMonitors(data.fullRefresh, data.ddcciType)
+            lastRefresh = deepCopy(results)
+            process.send({
+                type: 'refreshMonitors',
+                monitors: results,
+                generation: data.generation,
+                canEnrichCapabilities: !!(data.fullRefresh && shouldEnrichCapabilities())
+            })
+        } else if (data.type === "readKnownBrightness") {
+            const brightness = await readKnownBrightness()
+            process.send({
+                type: 'knownBrightness',
+                brightness,
+                requestId: data.requestId
+            })
+        } else if (data.type === "enrichMonitorCapabilities") {
+            const results = await enrichMonitorCapabilities()
+            if (results) lastRefresh = deepCopy(results)
+            process.send({
+                type: 'monitorsEnriched',
+                monitors: (results || false),
+                generation: data.generation,
+                failed: !results
+            })
+        } else if (data.type === "brightness") {
+            setBrightness(data.brightness, data.id)
+        }  else if (data.type === "sdr") {
+            setSDRBrightness(data.brightness, data.id)
+        } else if (data.type === "gamma") {
+            setGammaBrightness(data.brightness, data.id)
+        } else if (data.type === "settings") {
+            const changedMonitors = changedFeatureMonitorIds(settings, data.settings || {})
+            const hadSoftwareBrightness = (settings?.useSoftwareBrightnessFallback ? true : false)
+            settings = data.settings
+            invalidateFeatureSnapshots(changedMonitors)
+
+            if (hadSoftwareBrightness && !settings?.useSoftwareBrightnessFallback) restoreSoftwareBrightness();
+
+            // Overrides
+            applyMethodOverride("disableAppleStudio", value => appleStudioUnavailable = value)
+            applyMethodOverride("disableWMIC", value => wmicUnavailable = (value || !wmicExists()))
+            applyMethodOverride("disableWMI", value => wmiFailed = value)
+            applyMethodOverride("disableWin32", value => win32Failed = value)
+
+        } else if (data.type === "ddcBrightnessVCPs") {
+            const changedMonitors = changedFeatureMonitorIds(
+                { userDDCBrightnessVCPs: ddcBrightnessVCPs },
+                { userDDCBrightnessVCPs: data.ddcBrightnessVCPs || {} }
+            )
+            ddcBrightnessVCPs = data.ddcBrightnessVCPs
+            invalidateFeatureSnapshots(changedMonitors)
+            // Update brightnessType for monitors whose VCP override changed. This
+            // message is sent on every settings change, and everything else keeps
+            // the code detected for it (0x13, 0x6B, ...) rather than 0x10.
+            if (monitors && changedMonitors.size) {
+                for (const hwid2 in monitors) {
+                    if (monitors[hwid2].type === "ddcci") {
+                        const hwid = monitors[hwid2].hwid
+                        if (hwid && changedMonitors.has(hwid[1])) {
+                            if (ddcBrightnessVCPs[hwid[1]]) {
+                                // Custom VCP code set - use it (already parsed as int in electron.js)
+                                const vcpCode = ddcBrightnessVCPs[hwid[1]]
+                                if (!isNaN(vcpCode) && vcpCode >= 0 && vcpCode <= 0xFF) {
+                                    monitors[hwid2].brightnessType = vcpCode
+                                } else {
+                                    // Invalid VCP code, fall back to default
+                                    monitors[hwid2].brightnessType = 0x10
+                                }
+                            } else {
+                                // Override removed - reset to default (0x10 = 16)
+                                // until the refresh that follows detects it again
+                                monitors[hwid2].brightnessType = 0x10
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (data.type === "localization") {
+            localization = data.localization
+        } else if (data.type === "vcp") {
+            setVCP(data.monitor, data.code, data.value)
+        } else if (data.type === "flushvcp") {
+            vcpCache = {}
+            monitorReports = {}
+            monitorReportsRaw = {}
+            monitorFeatureSnapshots = {}
+            invalidatedFeatureSnapshotMonitorIds.clear()
+            ddcci._clearDisplayCache()
+        } else if (data.type === "wmi-bridge-ok") {
+            canUseWmiBridge = data.value
+        } else if (data.type === "getVCP") {
+            getDDCCI()
+            const vcp = await checkVCP(data.monitor, data.code)
+            process.send({
+                type: `getVCP::${data.monitor}::${data.code}`,
+                monitor: data.monitor,
+                code: data.code,
+                value: vcp
+            })
+        } else if (data.type === "getReport") {
+            process.send({
+                type: `getReport`,
+                report: {
+                    lastDDCCIList,
+                    lastWMI,
+                    lastWin32,
+                    lastHDR,
+                    monitorsAppleStudio,
+                    monitorReports,
+                    monitorReportsRaw,
+                    lastRefresh,
+                    settings,
+                    unstableDDC,
+                    ddcSafetyFallback: getDDCSafetyReport()
+                }
+            })
+        }
+    } catch (e) {
+        console.log(e)
+    }
+}
+
+let isDev = (process.argv.indexOf("--isdev=true") >= 0)
+let skipTest = (process.argv.indexOf("--skiptest=true") >= 0)
+
+//
+// Crash evidence for risky DDC/CI operations.
+//
+// Capabilities reads and DDC probing can hang or crash the whole process
+// (or machine) on misbehaving monitors/drivers. A sentinel file is written
+// before each risky operation and removed afterwards. If a sentinel
+// survives to the next startup, the previous session died mid-operation,
+// and DDC/CI validation is downgraded to the "fast" method (which never
+// requests capabilities strings) instead of hanging again on every start.
+//
+const sentinelFs = require('fs')
+const sentinelPathModule = require('path')
+const dataPathArg = process.argv.find(arg => arg.indexOf("--datapath=") === 0)
+const sentinelDir = (dataPathArg ? dataPathArg.substring(11) : require('os').tmpdir())
+const sentinelPath = sentinelPathModule.join(sentinelDir, "ddc-probe.lock")
+const unstableDDCPath = sentinelPathModule.join(sentinelDir, "ddc-unstable.json")
+
+let unstableDDC = {}
+
+function writeUnstableDDC() {
+    try {
+        sentinelFs.writeFileSync(unstableDDCPath, JSON.stringify(unstableDDC))
+    } catch (e) {
+        console.log("Couldn't save unstable DDC list", e)
+    }
+}
+
+function checkForDDCCrashEvidence() {
+    try {
+        try {
+            if (sentinelFs.existsSync(unstableDDCPath)) {
+                unstableDDC = JSON.parse(sentinelFs.readFileSync(unstableDDCPath, "utf8")) || {}
+            }
+        } catch (e) {
+            unstableDDC = {}
+        }
+
+        if (!sentinelFs.existsSync(sentinelPath)) return;
+
+        let evidence = {}
+        try {
+            evidence = JSON.parse(sentinelFs.readFileSync(sentinelPath, "utf8")) || {}
+        } catch (e) { }
+        sentinelFs.unlinkSync(sentinelPath)
+
+        console.log("\x1b[41mA previous session died during a DDC/CI operation. Downgrading DDC/CI validation to \"fast\".\x1b[0m", evidence)
+        unstableDDC.downgraded = { time: Date.now(), stage: evidence.stage, monitor: evidence.monitor }
+        if (evidence.monitor) {
+            unstableDDC[evidence.monitor] = { time: Date.now(), stage: evidence.stage }
+        }
+        writeUnstableDDC()
+    } catch (e) {
+        console.log("Error checking DDC crash evidence", e)
+    }
+}
+checkForDDCCrashEvidence()
+
+function getDDCSafetyReport() {
+    const fallback = unstableDDC.downgraded || false
+    const effectiveMethod = determineDDCCIMethod()
+    const affectedDisplays = Object.entries(unstableDDC)
+        .filter(([id]) => id !== "downgraded")
+        .map(([id, evidence]) => ({
+            id,
+            stage: evidence?.stage || false,
+            time: evidence?.time || false
+        }))
+
+    return {
+        active: !!fallback,
+        fallbackInEffect: !!fallback && effectiveMethod === "fast",
+        effectiveValidationMethod: effectiveMethod,
+        fallbackValidationMethod: (fallback ? "fast" : false),
+        detectedAt: fallback?.time || false,
+        stage: fallback?.stage || false,
+        affectedDisplays
+    }
+}
+
+function ddcSentinelStart(stage, monitor = false) {
+    try {
+        sentinelFs.writeFileSync(sentinelPath, JSON.stringify({ stage, monitor, time: Date.now() }))
+    } catch (e) { }
+}
+
+function ddcSentinelEnd() {
+    try {
+        sentinelFs.unlinkSync(sentinelPath)
+    } catch (e) { }
+}
+
+function withDDCSentinel(stage, monitor, operation) {
+    ddcSentinelStart(stage, monitor)
+    try {
+        return operation()
+    } finally {
+        // A native crash never reaches this point, leaving evidence for the
+        // next worker. Ordinary JavaScript/native errors do, so don't treat
+        // them as crashes on the next startup.
+        ddcSentinelEnd()
+    }
+}
+
+// A graceful exit mid-operation isn't crash evidence.
+process.on('exit', ddcSentinelEnd)
+
+let monitors = false
+let monitorNames = []
+let monitorsAppleStudio = {}
+let monitorsWin32 = {}
+let monitorReports = {}
+let monitorReportsRaw = {}
+let monitorFeatureSnapshots = {}
+let invalidatedFeatureSnapshotMonitorIds = new Set()
+
+let settings = { order: [] }
+let localization = {}
+let canUseWmiBridge = false
+
+let ddcBrightnessVCPs = {}
+
+function featureSnapshotKey(monitor) {
+    return Array.isArray(monitor?.hwid) ? monitor.hwid.join("#") : false
+}
+
+function saveFeatureSnapshot(monitor, acceptInvalidatedSnapshots = false) {
+    if (!monitor?.ddcciSupported || monitor.featuresPending || monitor.featuresRefreshing) return false
+    const monitorId = monitor.hwid?.[1]
+    if (invalidatedFeatureSnapshotMonitorIds.has(monitorId) && !acceptInvalidatedSnapshots) return false
+    const key = featureSnapshotKey(monitor)
+    const snapshot = deepCopy({
+        features: monitor.features || {},
+        vcpCodes: monitor.vcpCodes || {}
+    })
+    if (!key || !snapshot) return false
+
+    monitorFeatureSnapshots[key] = snapshot
+    if (acceptInvalidatedSnapshots) invalidatedFeatureSnapshotMonitorIds.delete(monitorId)
+    return true
+}
+
+function saveFeatureSnapshots(source = monitors, acceptInvalidatedSnapshots = false) {
+    for (const monitor of Object.values(source || {})) {
+        saveFeatureSnapshot(monitor, acceptInvalidatedSnapshots)
+    }
+}
+
+function applyFeatureSnapshots(foundMonitors) {
+    for (const monitor of Object.values(foundMonitors || {})) {
+        if (!monitor?.ddcciSupported || monitor.type !== "ddcci" || !monitor.featuresPending) continue
+        const snapshot = monitorFeatureSnapshots[featureSnapshotKey(monitor)]
+        if (!snapshot) continue
+
+        // Current Fast readings take precedence (especially brightness), while
+        // the last verified feature set keeps controls available during refresh.
+        // Keep the session cache isolated from the live model. A VCP update
+        // must not silently mutate a snapshot that was intentionally frozen.
+        const snapshotFeatures = deepCopy(snapshot.features || {})
+        const snapshotVcpCodes = deepCopy(snapshot.vcpCodes || {})
+        if (!snapshotFeatures || !snapshotVcpCodes) continue
+        monitor.features = Object.assign({}, snapshotFeatures, monitor.features || {})
+        monitor.vcpCodes = Object.assign({}, snapshotVcpCodes, monitor.vcpCodes || {})
+        monitor.featuresPending = false
+        monitor.featuresRefreshing = true
+    }
+}
+
+// Each method's flag is also set when the method fails or is missing, so turning
+// a setting back off only clears the flag if the setting is what set it.
+const userDisabledMethods = new Set()
+function applyMethodOverride(setting, setDisabled) {
+    if (settings?.[setting]) {
+        userDisabledMethods.add(setting)
+        setDisabled(true)
+    } else if (userDisabledMethods.delete(setting)) {
+        setDisabled(false)
+    }
+}
+
+function changedFeatureMonitorIds(previous = {}, next = {}) {
+    const ids = new Set()
+    const settingGroups = [
+        "monitorFeatures",
+        "monitorFeaturesSettings",
+        "userDDCBrightnessVCPs"
+    ]
+    for (const group of settingGroups) {
+        for (const id of new Set([
+            ...Object.keys(previous[group] || {}),
+            ...Object.keys(next[group] || {})
+        ])) {
+            if (JSON.stringify(previous[group]?.[id]) !== JSON.stringify(next[group]?.[id])) {
+                ids.add(id)
+            }
+        }
+    }
+    return ids
+}
+
+function invalidateFeatureSnapshots(monitorIds) {
+    if (!monitorIds?.size) return
+    for (const id of monitorIds) invalidatedFeatureSnapshotMonitorIds.add(id)
+    for (const key of Object.keys(monitorFeatureSnapshots)) {
+        if (monitorIds.has(key.split("#")[1])) delete monitorFeatureSnapshots[key]
+    }
+}
+
+let busyLevel = 0
+refreshMonitors = async (fullRefresh = false, ddcciType = "default", alwaysSendUpdate = false) => {
+    try {
+        if ((busyLevel > 0 && !fullRefresh) || (busyLevel > 0 && fullRefresh)) {
+            console.log("Thread busy. Cancelling refresh.")
+            return false
+        }
+        busyLevel = (fullRefresh ? 2 : 1)
+
+        if (!monitors || fullRefresh) {
+            if (fullRefresh) saveFeatureSnapshots(monitors)
+            const useCapabilityEnrichment = shouldEnrichCapabilities()
+            const foundMonitors = await getAllMonitors(
+                (useCapabilityEnrichment ? "fast" : determineDDCCIMethod()),
+                useCapabilityEnrichment
+            )
+            if (useCapabilityEnrichment) applyFeatureSnapshots(foundMonitors)
+            monitors = foundMonitors
+        } else {
+            let startTime = process.hrtime()
+
+            // DDC/CI
+            try {
+                if (settings?.getDDCBrightnessUpdates) {
+                    if(!getDDCCI()) {
+                        ddcci._refresh(
+                            (shouldEnrichCapabilities() ? "fast" : determineDDCCIMethod()),
+                            true,
+                            !settings.disableHighLevel
+                        )
+                    }
+                    for (const hwid2 in monitors) {
+                        if (monitors[hwid2].type === "ddcci" && monitors[hwid2].brightnessType) {
+                            const monitor = await getBrightnessDDC(monitors[hwid2])
+                            monitors[hwid2] = monitor
+                        }
+                    }
+                    console.log(`getBrightnessDDC() Total: ${process.hrtime(startTime)[1] / 1000000}ms`)
+                }
+            } catch (e) {
+                console.log("\x1b[41m" + "getBrightnessDDC() failed!" + "\x1b[0m", e)
+            }
+
+            // Internal display brightness (native WMI preferred, WMIC fallback)
+            if (canUseInternalBrightness()) {
+                try {
+                    startTime = process.hrtime.bigint()
+                    const wmiBrightness = await getBrightnessInternal()
+                    console.log(`getBrightnessInternal() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+
+                    if (wmiBrightness) {
+                        updateDisplay(monitors, wmiBrightness.hwid[2], wmiBrightness)
+
+                        // If Win32 doesn't find the internal display, hide it.
+                        if (settings?.hideClosedLid && Object.keys(monitorsWin32).indexOf(wmiBrightness.hwid[2]) < 0) {
+                            updateDisplay(monitors, wmiBrightness.hwid[2], { type: "none" })
+                        }
+                    }
+                } catch (e) {
+                    console.log("\x1b[41m" + "getBrightnessInternal() failed!" + "\x1b[0m", e)
+                }
+            }
+
+            // Apple Studio displays
+            if (!appleStudioUnavailable) {
+                try {
+                    startTime = process.hrtime.bigint()
+                    monitorsAppleStudio = await getStudioDisplay(monitors);
+                    console.log(`getStudioDisplay() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+                } catch (e) {
+                    console.log("\x1b[41m" + "getStudioDisplay() failed!" + "\x1b[0m", e)
+                }
+            }
+
+            // HDR
+            if (!settings?.disableHDR) {
+                try {
+                    startTime = process.hrtime.bigint()
+                    monitorsHDR = await getHDRDisplays(monitors);
+                    console.log(`getHDRDisplays() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+                } catch (e) {
+                    console.log("\x1b[41m" + "getHDRDisplays() failed!" + "\x1b[0m", e)
+                }
+            }
+
+            // Hide internal
+            if (settings?.hideClosedLid) {
+                const wmiMonitor = Object.values(monitors).find(mon => mon.type === "wmi")
+                if (wmiMonitor && !monitorsWin32[wmiMonitor.hwid[2]]) {
+                    updateDisplay(monitors, wmiMonitor.hwid[2], { type: "none" })
+                }
+            }
+
+        }
+    } catch (e) { console.log(e) }
+
+    busyLevel = 0
+    return monitors
+}
+
+// Read only the values needed to accurately apply an animated time adjustment.
+// This deliberately avoids rediscovering displays, scanning capabilities, or
+// refreshing feature values. Those operations remain the responsibility of a
+// normal monitor refresh.
+async function readKnownBrightness() {
+    if (!monitors) return {}
+
+    const result = {}
+    const unreadableMonitorIds = new Set()
+
+    try {
+        for (const hwid2 in monitors) {
+            const monitor = monitors[hwid2]
+            if (monitor.type !== "ddcci" || !monitor.brightnessType) continue
+
+            const refreshedMonitor = await getBrightnessDDC(monitor, false, true)
+            if (!refreshedMonitor.brightnessReadFailed) {
+                monitors[hwid2] = refreshedMonitor
+            } else {
+                unreadableMonitorIds.add(monitor.id)
+            }
+        }
+    } catch (e) {
+        console.log("\x1b[41mgetKnownBrightnessDDC() failed!\x1b[0m", e)
+    }
+
+    // Internal display brightness (native WMI preferred, WMIC fallback)
+    if (canUseInternalBrightness()) {
+        try {
+            const wmiBrightness = await getBrightnessInternal()
+            if (wmiBrightness) updateDisplay(monitors, wmiBrightness.hwid[2], wmiBrightness)
+        } catch (e) {
+            console.log("\x1b[41mgetKnownBrightnessInternal() failed!\x1b[0m", e)
+        }
+    }
+
+    if (!appleStudioUnavailable) {
+        for (const monitorKey in monitors) {
+            const monitor = monitors[monitorKey]
+            if (monitor.type !== "studio-display") continue
+            try {
+                const display = monitorsAppleStudio[monitorKey]
+                if (!display) throw new Error("Studio Display is not in the known display cache.")
+                const brightness = await display.getBrightness()
+                monitor.brightness = brightness
+                monitor.brightnessRaw = brightness
+                monitor.brightnessMax = 100
+            } catch (e) {
+                unreadableMonitorIds.add(monitor.id)
+                console.log("\x1b[41mgetKnownBrightnessStudioDisplay() failed!\x1b[0m", e)
+            }
+        }
+    }
+
+    if (!settings?.disableHDR) {
+        try {
+            monitorsHDR = await getHDRDisplays(monitors)
+        } catch (e) {
+            console.log("\x1b[41mgetKnownBrightnessHDR() failed!\x1b[0m", e)
+        }
+    }
+
+    readGammaBrightness(monitors)
+    applySoftwareBrightness(monitors)
+
+    for (const hwid2 in monitors) {
+        const monitor = monitors[hwid2]
+        if (!monitor?.id || (monitor.type === "none" && !settings?.gammaAsMainSliderDisplays?.[hwid2])) continue
+        if (unreadableMonitorIds.has(monitor.id)) continue
+        result[monitor.id] = {
+            brightness: monitor.brightness,
+            brightnessRaw: monitor.brightnessRaw,
+            brightnessMax: monitor.brightnessMax,
+            gammaBrightness: monitor.gammaBrightness,
+            sdrLevel: monitor.sdrLevel,
+            hdr: monitor.hdr
+        }
+    }
+
+    return result
+}
+
+// Accurate and Auto scans publish a usable Fast result before requesting
+// capabilities strings, which are the least reliable DDC/CI operation.
+async function enrichMonitorCapabilities() {
+    if (busyLevel > 0 || !monitors || !shouldEnrichCapabilities()) {
+        console.log("Skipping capabilities enrichment.")
+        return false
+    }
+
+    busyLevel = 2
+    try {
+        getDDCCI()
+        const monitorsToEnrich = Array.isArray(lastDDCCIList) ? [...lastDDCCIList] : []
+
+        for (const monitor of monitorsToEnrich) {
+            const id = monitor?.deviceKey
+            if (!id || monitorReports[id] || unstableDDC[id]) continue
+
+            try {
+                const reportRaw = withDDCSentinel("capabilities", id, () =>
+                    ddcci.getCapabilitiesRaw(id)
+                )
+                if (reportRaw) {
+                    monitorReportsRaw[id] = reportRaw
+                    const report = ddcci._parseCapabilitiesString(reportRaw)
+                    if (report && Object.keys(report).length > 0) {
+                        monitorReports[id] = report
+                    }
+                }
+            } catch (e) {
+                // One optional report must not invalidate the Fast result.
+                console.log("Couldn't get capabilities report for monitor " + id)
+            }
+        }
+
+        // The native cache now owns the capabilities strings. Rebuild the
+        // normal feature set without requesting another string from hardware.
+        monitors = await getAllMonitors("fast", false)
+        saveFeatureSnapshots(monitors, true)
+        return monitors
+    } catch (e) {
+        console.log("Couldn't enrich monitor capabilities", e)
+        return false
+    } finally {
+        busyLevel = 0
+    }
+}
+
+
+getAllMonitors = async (ddcciMethod = "default", coreOnly = false) => {
+    const foundMonitors = {}
+    let startTime = process.hrtime.bigint()
+    let fullStartTime = process.hrtime.bigint()
+
+    // List via WMI (native bridge preferred, WMIC fallback)
+    if (canUseInternalBrightness()) {
+        try {
+            const monitorsWMI = await getMonitorsInternal()
+            console.log(`getMonitorsInternal() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+            for (const hwid2 in monitorsWMI) {
+                const monitor = monitorsWMI[hwid2]
+                updateDisplay(foundMonitors, hwid2, monitor)
+            }
+        } catch (e) {
+            console.log("\x1b[41m" + "getMonitorsInternal() failed!" + "\x1b[0m", e)
+        }
+    } else {
+        console.log("getMonitorsInternal() skipped. No WMI method available.")
+    }
+
+    // List via Win32 (more details)
+    if (!win32Failed) {
+        try {
+            startTime = process.hrtime.bigint()
+            monitorsWin32 = await getMonitorsWin32()
+            console.log(`getMonitorsWin32() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+
+            for (const hwid2 in monitorsWin32) {
+                const monitor = monitorsWin32[hwid2]
+                updateDisplay(foundMonitors, hwid2, monitor)
+            }
+        } catch (e) {
+            console.log("\x1b[41m" + "getMonitorsWin32() failed!" + "\x1b[0m", e)
+        }
+    } else {
+        console.log("getMonitorsWin32() skipped due to previous failure.")
+    }
+
+    // List Apple Studio displays
+    if (!appleStudioUnavailable) {
+        try {
+            startTime = process.hrtime.bigint()
+            monitorsAppleStudio = await getStudioDisplay(foundMonitors);
+            console.log(`getStudioDisplay() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+        } catch (e) {
+            console.log("\x1b[41m" + "getStudioDisplay() failed!" + "\x1b[0m", e)
+        }
+    } else {
+        console.log("getStudioDisplay() skipped due to previous failure.")
+    }
+    
+
+    // DDC/CI Brightness + Features
+    try {
+        startTime = process.hrtime.bigint()
+        const featuresList = await getFeaturesDDC(ddcciMethod, coreOnly)
+
+        for (const hwid2 in featuresList) {
+            const monitor = featuresList[hwid2]
+            const { features, id, hwid, vcpCodes, path, ddcciSupported, highLevelSupported, featureScanTimedOut } = monitor
+            const canUseHighLevelBrightness = !settings.disableHighLevel && highLevelSupported?.brightness
+            // A timed-out DDC scan must not trigger another DDC probe. Use the
+            // standard luminance VCP as the high-level API's placeholder so
+            // downstream feature and display-type handling remains valid.
+            const brightnessType = featureScanTimedOut
+                ? (canUseHighLevelBrightness ? 0x10 : false)
+                : await determineBrightnessVCPCode(id)
+
+            let ddcciInfo = {
+                id: id,
+                key: hwid2,
+                hwid,
+                path,
+                ddcciSupported,
+                highLevelSupported,
+                features: features,
+                vcpCodes: vcpCodes,
+                featuresPending: !!coreOnly,
+                type: ((ddcciSupported || highLevelSupported?.brightness) && brightnessType ? "ddcci" : "none"),
+                min: 0,
+                max: 100,
+                brightnessType: brightnessType,
+                brightnessValues: (features[brightnessType] ? features[brightnessType] : [50, 100])
+            }
+
+            let brightness;
+            if(canUseHighLevelBrightness && !(brightnessType > 0x10)) {
+                brightness = await getHighLevelBrightness(id)
+            } else {
+                brightness = await checkVCP(id, parseInt(brightnessType))
+            }
+            
+            // Force lower max brightness for testing
+            if(brightness?.[1]) {
+                if(settings.debugForceBrightnessMax) brightness[1] = settings.debugForceBrightnessMax
+            }
+
+            if(brightness) {
+                ddcciInfo.brightnessValues = brightness
+                features[vcpStr(brightnessType)] = brightness
+            }       
+
+            ddcciInfo.brightnessRaw = ddcciInfo.brightnessValues[0]
+            ddcciInfo.brightnessMax = ddcciInfo.brightnessValues[1]
+
+            // Get normalization info
+            ddcciInfo = applyRemap(ddcciInfo)
+
+            // Unnormalize brightness
+            ddcciInfo.brightness = normalizeBrightness(ddcciInfo.brightnessRaw, true, ddcciInfo.min, ddcciInfo.max)
+            updateDisplay(foundMonitors, hwid2, ddcciInfo)
+        }
+        console.log(`getFeaturesDDC() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+    } catch (e) {
+        console.log("\x1b[41m" + "getFeaturesDDC() failed!" + "\x1b[0m", e)
+    }
+
+    // Re-apply Studio Display control after DDC/CI, which may mark Apple displays as unsupported.
+    if (!appleStudioUnavailable) {
+        try {
+            startTime = process.hrtime.bigint()
+            monitorsAppleStudio = await getStudioDisplay(foundMonitors);
+            console.log(`getStudioDisplay() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+        } catch (e) {
+            console.log("\x1b[41m" + "getStudioDisplay() failed!" + "\x1b[0m", e)
+        }
+    }
+
+    // Internal display brightness (native WMI preferred, WMIC fallback)
+    if (canUseInternalBrightness()) {
+        try {
+            startTime = process.hrtime.bigint()
+            const wmiBrightness = await getBrightnessInternal()
+            console.log(`getBrightnessInternal() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+
+            if (wmiBrightness) {
+                updateDisplay(foundMonitors, wmiBrightness.hwid[2], wmiBrightness)
+
+                // If Win32 doesn't find the internal display, hide it.
+                if (settings?.hideClosedLid && Object.keys(monitorsWin32).indexOf(wmiBrightness.hwid[2]) < 0) {
+                    updateDisplay(foundMonitors, wmiBrightness.hwid[2], { type: "none" })
+                }
+            }
+        } catch (e) {
+            console.log("\x1b[41m" + "getBrightnessInternal() failed!" + "\x1b[0m", e)
+        }
+    } else {
+        console.log("getBrightnessInternal() skipped. No WMI method available.")
+    }
+
+    // HDR
+    if (!settings.disableHDR) {
+        try {
+            startTime = process.hrtime.bigint()
+            monitorsHDR = await getHDRDisplays(foundMonitors);
+            console.log(`getHDRDisplays() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+        } catch (e) {
+            console.log("\x1b[41m" + "getHDRDisplays() failed!" + "\x1b[0m", e)
+        }
+    }
+
+    // Gamma
+    if (gammaFeaturesActive()) {
+        try {
+            startTime = process.hrtime.bigint()
+            readGammaBrightness(foundMonitors)
+            console.log(`readGammaBrightness() Total: ${(startTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+        } catch (e) {
+            console.log("\x1b[41m" + "readGammaBrightness() failed!" + "\x1b[0m", e)
+        }
+    }
+
+    applySoftwareBrightness(foundMonitors)
+
+    // Hide internal
+    if (settings?.hideClosedLid) {
+        const wmiMonitor = Object.values(foundMonitors).find(mon => mon.type === "wmi")
+        if (wmiMonitor && !monitorsWin32[wmiMonitor.hwid[2]]) {
+            updateDisplay(foundMonitors, wmiMonitor.hwid[2], { type: "none" })
+        }
+    }
+
+    // Finally, fix names/num
+    try {
+        let idx = 0
+        for (const hwid2 in foundMonitors) {
+            if (!foundMonitors[hwid2].name) foundMonitors[hwid2].name = `${localization.GENERIC_DISPLAY_SINGLE} ${idx + 1}`;
+            foundMonitors[hwid2].num = idx;
+            idx++
+        }
+    } catch (e) {
+        console.log("\x1b[41m" + "Fixing names failed!" + "\x1b[0m", e)
+    }
+
+    console.log(`getAllMonitors() total: ${(fullStartTime - process.hrtime.bigint()) / BigInt(-1000000)}ms`)
+    try {
+        console.log(`Monitors found: ${Object.keys(foundMonitors)}`)
+    } catch (e) { }
+    return foundMonitors
+}
+
+function determineDDCCIMethod() {
+    let ddcciMethod = (isFastFine ? "fast" : "accurate")
+
+    const savedMethod = settings?.preferredDDCCIMethod
+    const ddcciMethodValues = ["fast", "accurate", "no-validation", "legacy"]
+    if(savedMethod && ddcciMethodValues.indexOf(savedMethod) >= 0) {
+        // An explicit user preference wins over the crash downgrade.
+        ddcciMethod = savedMethod
+    } else if (unstableDDC.downgraded && ddcciMethod === "accurate") {
+        console.log("Using \"fast\" DDC/CI validation due to crash evidence from a previous session.")
+        ddcciMethod = "fast"
+    }
+    return ddcciMethod
+}
+
+function shouldEnrichCapabilities() {
+    const savedMethod = settings?.preferredDDCCIMethod
+    if (savedMethod === "accurate") return true
+    // Auto keeps its crash-recovery behavior: don't retry a capabilities read
+    // after a worker died while probing DDC/CI.
+    if (savedMethod === "auto") return !unstableDDC.downgraded
+    return false
+}
+
+let appleStudioUnavailable = false
+const STUDIO_DISPLAY_VENDOR_ID = 0x05ac
+const STUDIO_DISPLAY_PRODUCT_IDS = [0x1118]
+const STUDIO_DISPLAY_BRIGHTNESS_INTERFACE = 0x7
+const STUDIO_DISPLAY_REPORT_ID = 0x01
+const STUDIO_DISPLAY_BRIGHTNESS_MIN = 400
+const STUDIO_DISPLAY_BRIGHTNESS_MAX = 60000
+
+function percentToStudioDisplayNits(percent) {
+    return STUDIO_DISPLAY_BRIGHTNESS_MIN + ((STUDIO_DISPLAY_BRIGHTNESS_MAX - STUDIO_DISPLAY_BRIGHTNESS_MIN) * (percent / 100))
+}
+
+function studioDisplayNitsToPercent(nits) {
+    return ((nits - STUDIO_DISPLAY_BRIGHTNESS_MIN) / (STUDIO_DISPLAY_BRIGHTNESS_MAX - STUDIO_DISPLAY_BRIGHTNESS_MIN)) * 100
+}
+
+function makeStudioDisplayRequestData(percent) {
+    const bytes = Buffer.alloc(7)
+    bytes[0] = STUDIO_DISPLAY_REPORT_ID
+    bytes.writeUInt16LE(Math.round(percentToStudioDisplayNits(percent)), 1)
+    return bytes
+}
+
+function getFallbackStudioDisplays(existingSerials = []) {
+    try {
+        const usb = require("usb")
+        const { promisify } = require("util")
+        const controlTransfer = promisify(usb.Device.prototype.controlTransfer)
+        const getStringDescriptor = promisify(usb.Device.prototype.getStringDescriptor)
+        const releaseInterface = promisify(usb.Interface.prototype.release)
+        const requestType = 0x20 | 0x01
+        const reportValue = 0x0300 | STUDIO_DISPLAY_REPORT_ID
+
+        return usb.getDeviceList()
+            .filter(dev => {
+                const desc = dev.deviceDescriptor
+                return desc.idVendor === STUDIO_DISPLAY_VENDOR_ID && STUDIO_DISPLAY_PRODUCT_IDS.indexOf(desc.idProduct) >= 0
+            })
+            .map(dev => ({
+                async withBrightnessInterface(callback) {
+                    let iface
+                    try {
+                        dev.open()
+                        iface = dev.interface(STUDIO_DISPLAY_BRIGHTNESS_INTERFACE)
+                        iface.claim()
+                        return await callback(dev)
+                    } finally {
+                        try {
+                            if (iface) await releaseInterface.call(iface)
+                        } catch (e) {
+                            console.log("Fallback Studio Display release failed", e)
+                        }
+                        try {
+                            dev.close()
+                        } catch (e) {}
+                    }
+                },
+                async getSerialNumber() {
+                    const serial = await this.withBrightnessInterface(display => {
+                        return getStringDescriptor.call(display, display.deviceDescriptor.iSerialNumber)
+                    })
+                    return existingSerials.indexOf(serial) >= 0 ? undefined : serial
+                },
+                async getBrightness() {
+                    const response = await this.withBrightnessInterface(display => {
+                        return controlTransfer.call(display, 0x80 | requestType, 1, reportValue, STUDIO_DISPLAY_BRIGHTNESS_INTERFACE, 7)
+                    })
+                    return studioDisplayNitsToPercent(response.readUInt16LE(1))
+                },
+                async setBrightness(percent) {
+                    await this.withBrightnessInterface(display => {
+                        return controlTransfer.call(display, requestType, 9, reportValue, STUDIO_DISPLAY_BRIGHTNESS_INTERFACE, makeStudioDisplayRequestData(percent))
+                    })
+                }
+            }))
+    } catch(e) {
+        console.log("Fallback Studio Display detection failed", e)
+    }
+    return []
+}
+
+function isStudioDisplayAlias(monitor) {
+    return monitor?.hwid?.[1]?.startsWith("APPAE") || monitor?.name?.replace(/\s/g, "").toLowerCase().includes("studiodisplay")
+}
+
+function getStudioDisplayAliasKey(monitors, usedKeys = [], serial = "") {
+    const existingStudioKey = Object.keys(monitors).find(key => {
+        const monitor = monitors[key]
+        return usedKeys.indexOf(key) === -1 && monitor.type === "studio-display" && monitor.serial === serial
+    })
+    if (existingStudioKey) return existingStudioKey
+
+    return Object.keys(monitors).find(key => {
+        const monitor = monitors[key]
+        return usedKeys.indexOf(key) === -1 && isStudioDisplayAlias(monitor) && monitor.type !== "studio-display"
+    })
+}
+
+getStudioDisplay = async (monitors) => {
+    try {
+        const sdctl = require("studio-display-control")
+        const displays = {}
+        let count = 0
+        const usedKeys = []
+        const studioDisplays = sdctl.getDisplays()
+        const existingSerials = []
+        for (const display of studioDisplays) {
+            existingSerials.push(await display.getSerialNumber())
+        }
+        studioDisplays.push(...getFallbackStudioDisplays(existingSerials))
+
+        for (const display of studioDisplays) {
+            const serial = await display.getSerialNumber();
+            if (!serial) continue;
+            const brightness = await display.getBrightness()
+            const hwid = [
+                "\\\\?\\DISPLAY",
+                "APPAE3A",
+                `APLSTD-${serial}-NUM${count}`
+            ]
+            const existingKey = getStudioDisplayAliasKey(monitors, usedKeys, serial)
+            const monitorKey = existingKey || hwid[2]
+            const existingMonitor = monitors[monitorKey] || {}
+            const monitorHwid = existingMonitor.hwid?.length ? existingMonitor.hwid : hwid
+            const modelName = display.getModelName()
+            usedKeys.push(monitorKey)
+            updateDisplay(monitors, monitorKey, {
+                name: existingMonitor.name || modelName || "Apple Studio Display",
+                type: "studio-display",
+                key: monitorKey,
+                id: existingMonitor.id || `\\\\?\\${hwid[0]}#${hwid[1]}#${hwid[2]}`,
+                hwid: monitorHwid,
+                serial,
+                brightness,
+                brightnessRaw: brightness,
+                brightnessMax: 100,
+                brightnessValues: [brightness, 100],
+                min: 0,
+                max: 100
+            });
+            displays[monitorKey] = display
+            count++
+        }
+        return displays
+    } catch (e) {
+        console.log("\x1b[41m" + "getStudioDisplay(): failed to access Studio Display" + "\x1b[0m", e)
+    }
+    return {}
+}
+
+setStudioDisplayBrightness = async (serial, brightness) => {
+    try {
+        const monitorKey = Object.keys(monitors).find(key => monitors[key]?.serial === serial)
+        if (monitorKey && monitorsAppleStudio[monitorKey]) {
+            await monitorsAppleStudio[monitorKey].setBrightness(brightness)
+            return true
+        }
+
+        const sdctl = require("studio-display-control")
+        const studioDisplays = sdctl.getDisplays()
+        const existingSerials = []
+        for (const display of studioDisplays) {
+            existingSerials.push(await display.getSerialNumber())
+        }
+        studioDisplays.push(...getFallbackStudioDisplays(existingSerials))
+
+        for (const monitor of studioDisplays) {
+            const s = await monitor.getSerialNumber();
+            if (s === serial) {
+                await monitor.setBrightness(brightness);
+                return true
+            }
+        }
+    } catch (e) {
+        console.log("\x1b[41m" + "setStudioDisplayBrightness(): failed to set brightness" + "\x1b[0m", e)
+    }
+    return false
+}
+
+getHDRDisplays = async (monitors) => {
+    try {
+        const displays = hdr.getDisplays()
+        lastHDR = displays
+        for(const display of displays) {
+            const hwid = display.path.split("#")
+
+            const newDisplay = {
+                key: hwid[2],
+                id: display.path,
+                hwid,
+                sdrNits: display.nits,
+                sdrLevel: parseInt((display.nits - 80) / 4),
+                hdr: (display.hdrActive ? "active" : display.hdrEnabled ? "supported" : "unsupported")
+            }
+
+            if(display.name) {
+                newDisplay.name = display.name
+            }
+
+            updateDisplay(monitors, hwid[2], newDisplay);
+            displays[hwid[2]] = display
+        }
+    } catch(e) {
+        console.log("\x1b[41m" + "getHDRDisplays(): failed to access displays" + "\x1b[0m", e)
+    }
+
+    return monitors
+}
+
+// The native WMI bridge is preferred for the internal display. WMIC is
+// kept as a fallback for systems where the bridge is unavailable, and
+// doesn't exist at all on current Windows 11 builds.
+function canUseWmiBridgeNow() {
+    return canUseWmiBridge && !wmiFailed
+}
+
+function canUseInternalBrightness() {
+    return canUseWmiBridgeNow() || !wmicUnavailable
+}
+
+// win32-displayconfig reports the output technology behind each display.
+// These are the values Windows uses for a built-in panel, so they identify a
+// laptop without depending on a brightness read having already succeeded.
+// Note: "ldvs" is how win32-displayconfig spells LVDS. That typo is in the
+// library, so match both spellings in case it is ever corrected upstream.
+const INTERNAL_CONNECTORS = ["internal", "displayport_embedded", "udi_embedded", "ldvs", "lvds"]
+function hasInternalPanel() {
+    return Object.values(monitorsWin32 || {}).some(monitor => INTERNAL_CONNECTORS.indexOf(monitor?.connector) >= 0)
+}
+
+// A failed bridge call is often temporary (WMI busy at logon or after an
+// update), so the bridge is only given up on after repeated failures, and only
+// when WMIC is actually there to take over. wmiFailed also gates setBrightness,
+// so latching it without a fallback would trade a fast write path for nothing.
+const BRIDGE_FAILURE_LIMIT = 3
+function noteBridgeFailure(what, failures) {
+    if (failures >= BRIDGE_FAILURE_LIMIT && !wmicUnavailable && !wmiFailed) {
+        wmiFailed = true
+        console.log(`${what} failed ${failures} times. Falling back to WMIC.`)
+    }
+}
+
+// Lists internal displays via the preferred available WMI method. WMIC is
+// tried on every failed bridge listing, so a fallback doesn't have to wait
+// for the bridge to be given up on.
+let bridgeListingFailures = 0
+getMonitorsInternal = async () => {
+    if (canUseWmiBridgeNow()) {
+        const monitors = await getMonitorsWMI()
+        if (monitors) {
+            bridgeListingFailures = 0
+            return monitors
+        }
+        noteBridgeFailure("getMonitorsWMI()", ++bridgeListingFailures)
+    }
+    if (!wmicUnavailable) {
+        return await getMonitorsWMIC()
+    }
+    return false
+}
+
+// Reads internal display brightness via the preferred available WMI method.
+// Only failures for a real internal panel count towards giving up on the
+// bridge, since desktops have nothing to read. WMIC is tried on every failed
+// read for one.
+let bridgeBrightnessFailures = 0
+getBrightnessInternal = async () => {
+    if (canUseWmiBridgeNow()) {
+        const brightness = await getBrightnessWMI()
+        if (brightness) {
+            bridgeBrightnessFailures = 0
+            return brightness
+        }
+
+        // Nothing reports brightness through WMI (OEM-controlled or OLED panels,
+        // desktops). Not a failure, and WMIC would query the same class.
+        if (brightness === null) {
+            bridgeBrightnessFailures = 0
+            return false
+        }
+
+        // No internal panel to read. Expected on desktops, so leave WMIC alone.
+        if (!hasInternalPanel()) return brightness
+
+        noteBridgeFailure("getBrightnessWMI() for an internal panel", ++bridgeBrightnessFailures)
+    }
+    if (!wmicUnavailable) {
+        return await getBrightnessWMIC()
+    }
+    return false
+}
+
+let wmiFailed = false
+// Resolves false when the bridge couldn't list displays at all, so
+// getMonitorsInternal() can fall back. An empty object is a successful listing.
+// There is no timeout: the native call blocks, so one could never fire before
+// it returns.
+getMonitorsWMI = () => {
+    return new Promise(async (resolve, reject) => {
+        const foundMonitors = {}
+        try {
+            const wmiMonitors = await wmibridge.getMonitors();
+
+            if (wmiMonitors.failed) {
+                // Something went wrong
+                console.log("\x1b[41m" + "Recieved FAILED response from getMonitors()" + "\x1b[0m")
+                resolve(false)
+                return
+            } else {
+                // Sort through results
+                for (let monitorHWID in wmiMonitors) {
+                    const monitor = wmiMonitors[monitorHWID]
+
+                    if (!monitor.InstanceName) continue;
+
+                    let hwid = readInstanceName(monitor.InstanceName)
+                    hwid[2] = hwid[2].split("_")[0]
+
+                    const wmiInfo = {
+                        id: `\\\\?\\${hwid[0]}#${hwid[1]}#${hwid[2]}`,
+                        key: hwid[2],
+                        hwid: hwid,
+                        serial: monitor.SerialNumberID
+                    }
+
+                    if (monitor.UserFriendlyName !== null && monitor.UserFriendlyName !== "") {
+                        wmiInfo.name = monitor.UserFriendlyName
+                    }
+
+                    foundMonitors[hwid[2]] = wmiInfo
+                }
+            }
+        } catch (e) {
+            console.log(`getMonitorsWMI: Failed to get all monitors.`)
+            console.log(e)
+        }
+        lastWMI = deepCopy(foundMonitors)
+        resolve(foundMonitors)
+    })
+}
+
+let win32Failed = false
+getMonitorsWin32 = () => {
+    let foundDisplays = {}
+    return new Promise(async (resolve, reject) => {
+        try {
+            const timeout = setTimeout(() => { win32Failed = true; console.log("getMonitorsWin32 Timed out."); reject({}) }, 4000)
+            let displays = []
+            const displayConfig = await w32disp.extractDisplayConfig()
+
+            // Filter results
+            for (const display of displayConfig) {
+                // Must be an active display
+                if(display.inUse) {
+                    displays.push(display)
+                }
+            }
+
+            // Prepare results
+            for (const monitor of displays) {
+                const hwid = monitor.devicePath.split("#")
+                hwid[2] = hwid[2].split("_")[0]
+
+                const win32Info = {
+                    id: `${hwid[0]}#${hwid[1]}#${hwid[2]}`,
+                    key: hwid[2],
+                    connector: monitor.outputTechnology,
+                    hwid: hwid,
+                    sourceID: monitor.sourceConfigId?.id,
+                    scaling: monitor.scaling,
+                    bounds: monitor.sourceMode
+                }
+                if (monitor.displayName?.length > 0) {
+                    win32Info.name = monitor.displayName;
+                }
+
+                foundDisplays[hwid[2]] = win32Info
+            }
+
+            // Return prepared results
+            clearTimeout(timeout)
+        } catch (e) {
+            console.log(`getMonitorsWin32: Failed to get all monitors. (L2)`, e)
+        }
+        lastWin32 = deepCopy(foundDisplays)
+        resolve(foundDisplays)
+    })
+}
+
+getFeaturesDDC = (ddcciMethod = "accurate", coreOnly = false) => {
+    const monitorFeatures = {}
+    return new Promise(async (resolve, reject) => {
+        try {
+            // If the whole scan runs too long, return whatever was collected
+            // so far rather than failing every display.
+            let timedOut = false
+            const timeout = setTimeout(() => {
+                timedOut = true
+                console.log("getFeaturesDDC Timed out. Returning partial results.")
+                const snapshot = deepCopy(monitorFeatures)
+                resolve(snapshot || monitorFeatures)
+            }, 80000)
+
+            getDDCCI()
+            await wait(10)
+
+            // Sometimes the handles returned are NULL, so we should try again.
+            let tmpDdcciMonitors = withDDCSentinel("refresh", false, () =>
+                ddcci.getAllMonitors(ddcciMethod, true, !settings.disableHighLevel)
+            )
+            if(tmpDdcciMonitors) {
+                let doRetry = false
+                for(const monitor of tmpDdcciMonitors) {
+                    if(monitor.handleIsValid === false) {
+                        doRetry = monitor
+                        break
+                    }
+                }
+                if(doRetry) {
+                    console.log(`DDC/CI results contain a null handle (${doRetry?.deviceKey}). Trying again.`)
+                    await wait(200)
+                    tmpDdcciMonitors = withDDCSentinel("refresh", false, () =>
+                        ddcci.getAllMonitors(ddcciMethod, true, !settings.disableHighLevel)
+                    )
+                    for(const monitor of tmpDdcciMonitors) {
+                        if(monitor.handleIsValid === false) {
+                            console.log(`DDC/CI results still contain a null handle (${doRetry?.deviceKey}). Continuing anyway.`)
+                            break
+                        }
+                    }
+                }
+            }
+
+            const ddcciMonitors = tmpDdcciMonitors
+            lastDDCCIList = ddcciMonitors
+
+            for (let monitor of ddcciMonitors) {
+                if (timedOut) break;
+                const id = monitor.deviceKey
+                let featureTimedOut = false
+                // Stop this monitor's feature scan at the next safe await point,
+                // then continue with the remaining displays.
+                const featureTimeout = setTimeout(() => {
+                    featureTimedOut = true
+                    console.log("getFeaturesDDC Timed out on monitor:", id)
+                }, 15000)
+                const shouldAbortFeatureScan = () => timedOut || featureTimedOut
+
+                try {
+                    const hwid = id.split("#")
+                    let features = {}
+
+                    // Apply capabilities report, if available.
+                    if(monitor.capabilities && !monitorReports[id]) {
+                        monitorReports[id] = monitor.capabilities
+                    }
+
+                    if(monitor.ddcciSupported && !coreOnly && !shouldAbortFeatureScan()) {
+                        await wait(10)
+                        features = await checkMonitorFeatures(id, false, ddcciMethod, shouldAbortFeatureScan)
+                    }
+
+                    // Do not alter the collection after the global timeout has
+                    // returned its snapshot.
+                    if(timedOut) break
+
+                    monitorFeatures[hwid[2]] = {
+                        id: `${hwid[0]}#${hwid[1]}#${hwid[2]}`,
+                        hwid,
+                        features,
+                        featureScanTimedOut: featureTimedOut,
+                        ddcciSupported: monitor.ddcciSupported,
+                        highLevelSupported: {
+                            brightness: monitor.hlBrightnessSupported,
+                            contrast: monitor.hlContrastSupported
+                        },
+                        path: monitor.fullName,
+                        vcpCodes: (monitorReports[id] ? monitorReports[id] : {} )
+                    }
+                } finally {
+                    clearTimeout(featureTimeout)
+                }
+            }
+            clearTimeout(timeout)
+        } catch (e) {
+            console.log(`getFeaturesDDC: Failed to get features.`)
+            console.log(e)
+        }
+
+        resolve(monitorFeatures)
+    })
+}
+
+checkMonitorFeatures = async (monitor, skipCache = false, ddcciMethod = "accurate", shouldAbort = () => false) => {
+    const features = {}
+    try {
+        const hwid = monitor.split("#")
+
+        // Detect valid VCP codes for display if not already available
+        try {
+            if(shouldAbort()) return {}
+            if(unstableDDC[monitor]) {
+                console.log(`Skipping capabilities report for ${monitor} due to crash evidence from a previous session.`)
+            } else if(ddcciMethod === "accurate" && !monitorReports[monitor]) {
+                const reportRaw = withDDCSentinel("capabilities", monitor, () =>
+                    ddcci.getCapabilitiesRaw(monitor)
+                )
+                if(shouldAbort()) return {}
+                if(reportRaw) {
+                    monitorReportsRaw[monitor] = reportRaw
+                    const report = ddcci._parseCapabilitiesString(reportRaw)
+                    if(report && Object.keys(report)?.length > 0) {
+                        monitorReports[monitor] = report
+                    }
+                }
+            }
+        } catch(e) {
+            console.log("Couldn't get capabilities report for monitor " + monitor)
+        }
+
+        if(shouldAbort()) return {}
+
+        let getAllValues = false
+        if(getAllValues && monitorReports[monitor]) {
+            for(const code in monitorReports[monitor]) {
+                if(shouldAbort()) return {}
+                features[vcpStr(code)] = await checkVCP(monitor, code)
+                if(shouldAbort()) return {}
+            }
+        } else {
+            // Get custom DDC/CI features
+            const settingsFeatures = settings?.monitorFeatures?.[hwid[1]]
+            if(settingsFeatures) {
+                for(const vcp in settingsFeatures) {
+                    if(shouldAbort()) return {}
+                    if(ddcBrightnessVCPs[hwid[1]] && vcp == ddcBrightnessVCPs[hwid[1]]) {
+                        continue; // Skip if custom brightness
+                    }
+                    if(settingsFeatures[vcp]) {
+                        features[vcpStr(vcp)] = await checkVCPIfEnabled(monitor, parseInt(vcp), vcp, skipCache)
+                        if(shouldAbort()) return {}
+                    }
+                }
+            }
+
+            // Capabilities report allows us to skip this for unsupported codes, generally
+            const defaultFeatures = [
+                [0x10, "luminance"],
+                [0x13, "brightness"],
+                [0x12, "contrast"],
+                [0xD6, "powerState"],
+                [0x60, "inputControls"],
+                [0x62, "volume"]
+            ]
+            for(const [code, setting] of defaultFeatures) {
+                if(shouldAbort()) return {}
+                features[vcpStr(code)] = await checkVCPIfEnabled(monitor, code, setting, skipCache)
+                if(shouldAbort()) return {}
+            }
+        }
+
+    } catch (e) {
+        console.log(e)
+    }
+    return shouldAbort() ? {} : features
+}
+
+determineBrightnessVCPCode = async (monitor) => {
+    const hwid = monitor.split("#")
+    if(ddcBrightnessVCPs?.[hwid[1]]) {
+        return parseInt(ddcBrightnessVCPs[hwid[1]])
+    }
+    if(await checkIfVCPSupported(monitor, 0x10)) {
+        return 0x10 // luminance
+    }
+    if(await checkIfVCPSupported(monitor, 0x13)) {
+        return 0x13 // brightness
+    }
+    if(await checkIfVCPSupported(monitor, 0x6B)) {
+        return 0x6b // backlight level white
+    }
+    if(await checkIfVCPSupported(monitor, 0x12)) {
+        return 0x12 // contrast
+    }
+    return false
+}
+
+// Resolves false when the read failed, and null when it worked but no display
+// reports brightness through WMI.
+getBrightnessWMI = () => {
+    // Request WMI monitors.
+    return new Promise(async (resolve, reject) => {
+        try {
+            const timeout = setTimeout(() => { console.log("getBrightnessWMI Timed out."); reject(false) }, 4000)
+            const monitor = await wmibridge.getBrightness();
+            if (monitor.failed) {
+                // Something went wrong
+                clearTimeout(timeout)
+                resolve(monitor.unsupported ? null : false)
+            } else {
+                let hwid = readInstanceName(monitor.InstanceName)
+                hwid[2] = hwid[2].split("_")[0]
+
+                let wmiInfo = {
+                    id: `\\\\?\\${hwid[0]}#${hwid[1]}#${hwid[2]}`,
+                    brightness: monitor.Brightness,
+                    hwid: hwid,
+                    min: 0,
+                    max: 100,
+                    type: 'wmi',
+                }
+
+                // Get normalization info
+                wmiInfo = applyRemap(wmiInfo)
+
+                // Unnormalize brightness
+                wmiInfo.brightnessRaw = monitor.Brightness
+                wmiInfo.brightness = normalizeBrightness(wmiInfo.brightness, true, wmiInfo.min, wmiInfo.max)
+                clearTimeout(timeout)
+
+                resolve(wmiInfo)
+            }
+        } catch (e) {
+            console.log(e)
+            resolve(false)
+        }
+    })
+
+}
+
+getBrightnessDDC = (monitorObj, includeFeatures = true, reportReadFailure = false) => {
+    return new Promise(async (resolve, reject) => {
+        let monitor = Object.assign({}, monitorObj)
+
+        try {
+            const timeout = setTimeout(() => { console.log("getBrightnessDDC Timed out."); reject({}) }, 8000)
+            const ddcciPath = monitor.hwid.join("#")
+
+            // If brightness is not supported, stop
+            if (!monitor?.brightnessType) {
+                clearTimeout(timeout)
+                resolve(monitor)
+                return false
+            }
+
+            // Determine / get brightness
+            let brightnessValues = await checkVCP(ddcciPath, monitor.brightnessType, false, !reportReadFailure)
+            const brightnessReadFailed = !brightnessValues
+
+            // If something goes wrong and there are previous values, use those
+            if (!brightnessValues) {
+                console.log(`\x1b[41mNO BRIGHTNESS VALUES AVAILABLE FOR ${monitorObj.hwid[1]}\x1b[0m`)
+                if (monitor.brightnessRaw !== undefined && monitor.brightnessMax !== undefined) {
+                    console.log("\x1b[41mUSING PREVIOUS VALUES\x1b[0m")
+                    brightnessValues = [monitor.brightnessRaw, monitor.brightnessMax]
+                } else if (vcpCache[monitor] && vcpCache[monitor]["vcp_" + 0x10]) {
+                    console.log("\x1b[41mUSING VCP CACHE\x1b[0m")
+                    brightnessValues = vcpCache[monitor]["vcp_" + 0x10];
+                } else {
+                    console.log("CATASTROPHIC FAILURE", monitor)
+                    // Catastrophic failure. Revert to defaults.
+                    brightnessValues = [50, 100]
+                }
+            }
+
+            monitor.brightness = brightnessValues[0] * (100 / (brightnessValues[1] || 100))
+            monitor.brightnessMax = (brightnessValues[1] || 100)
+            monitor.brightnessRaw = brightnessValues[0] // Raw value from DDC/CI. Not normalized or adjusted.
+
+            // Get normalization info
+            monitor = applyRemap(monitor)
+            // Unnormalize brightness
+            monitor.brightness = normalizeBrightness(monitor.brightness, true, monitor.min, monitor.max)
+
+            // Get custom DDC/CI features
+            const settingsFeatures = settings?.monitorFeatures?.[monitor.hwid[1]]
+            if(includeFeatures && settingsFeatures) {
+                for(const vcp in settingsFeatures) {
+                    if(vcp == monitor.brightnessType) {
+                        continue; // Skip brightness
+                    }
+                    if(settingsFeatures[vcp]) {
+                        monitor.features[vcpStr(vcp)] = await checkVCP(monitor.id, parseInt(vcp))
+                    }
+                }
+            }
+
+            if (reportReadFailure) monitor.brightnessReadFailed = brightnessReadFailed
+            clearTimeout(timeout)
+            resolve(monitor)
+
+        } catch (e) {
+            console.log("updateBrightnessDDC: Couldn't get DDC/CI brightness.", e)
+            resolve(reportReadFailure ? Object.assign({}, monitorObj, { brightnessReadFailed: true }) : monitorObj)
+        }
+
+    })
+}
+
+updateDisplay = (monitors, hwid2, info = {}) => {
+    if (!monitors[hwid2]) {
+        monitors[hwid2] = {
+            id: null,
+            key: null,
+            num: null,
+            brightness: 50,
+            brightnessMax: 100,
+            brightnessRaw: 50,
+            type: "none",
+            connector: "unknown",
+            min: 0,
+            max: 100,
+            hwid: [],
+            name: null,
+            serial: null
+        }
+    }
+    Object.assign(monitors[hwid2], info)
+    return true
+}
+
+function setSDRBrightness(brightness, id) {
+    if(settings.disableHDR) return false;
+    try {
+        console.log("sdr", brightness, id)
+        return hdr.setSDRBrightness(id, (brightness * 0.01 * 400) + 80)
+    } catch(e) {
+        console.log(`Couldn't update SDR brightness! [${id}]`, e);
+        return false
+    }
+}
+
+function setBrightness(brightness, id) {
+    try {
+        if (id) {
+            let monitor = Object.values(monitors).find(mon => mon.id?.indexOf(id) >= 0)
+            if(monitor) {
+                // Check if user has set a custom brightness VCP code for this monitor
+                const hasCustomBrightnessVCP = monitor.hwid && ddcBrightnessVCPs[monitor.hwid[1]]
+                if (monitor.type == "studio-display") {
+                    setStudioDisplayBrightness(monitor.serial, brightness)
+                } else if (monitor.type === "software") {
+                    if (setSoftwareBrightness(monitor, brightness) === false) {
+                        console.log(`Couldn't set software brightness for monitor ${monitor.id}`)
+                        return false
+                    }
+                } else if(!settings.disableHighLevel && monitor.highLevelSupported?.brightness && !hasCustomBrightnessVCP) {
+                    setHighLevelBrightness(monitor.hwid.join("#"), brightness)
+                } else {
+                    setVCP(monitor.hwid.join("#"), monitor.brightnessType, brightness)
+                }
+                // Update tracked brightness values
+                const brightnessRaw = monitor.type === "software"
+                    ? Math.max(SOFTWARE_BRIGHTNESS_MIN, parseInt(brightness))
+                    : parseInt(brightness)
+                monitor.brightness = brightnessRaw * (100 / (monitor.brightnessMax || 100))
+                monitor.brightnessRaw = brightnessRaw
+                if(monitor.brightnessValues) monitor.brightnessValues[0] = brightnessRaw;
+            }
+        } else {
+            let monitor = Object.values(monitors).find(mon => mon.type == "wmi")
+            // WMI only takes whole levels, and the bridge rejects anything else.
+            // Normalization and calibration usually produce fractions.
+            brightness = Math.round(Math.max(0, Math.min(100, Number(brightness))))
+            monitor.brightness = brightness
+            monitor.brightnessRaw = brightness
+            if (canUseWmiBridgeNow()) {
+                // Set brightness via native WMI
+                wmibridge.setBrightness(brightness);
+            } else {
+                // If native WMI is unavailable, fall back to old method
+                exec(`powershell.exe -NoProfile (Get-WmiObject -Namespace root\\wmi -Class WmiMonitorBrightnessMethods).wmisetbrightness(0, ${brightness})`)
+            }
+        }
+    } catch (e) {
+        console.log(`Couldn't update brightness! [${id}]`);
+        console.log(monitors)
+        console.log(e)
+    }
+}
+
+let vcpCache = {}
+async function checkVCPIfEnabled(monitor, code, setting, skipCache = false) {
+    const vcpString = vcpStr(code)
+    if(!code || code == "0x0") return false;
+    try {
+        const hwid = monitor.split("#")
+        const userEnabledFeature = settings?.monitorFeatures?.[hwid[1]]?.[vcpString]
+        const isInReport = monitorReports[monitor]?.[vcpString] ? true : false
+        const hasReport = monitorReports[monitor] && Object.keys(monitorReports[monitor])?.length > 0 ? true : false
+        
+        if (hasReport && !isInReport) return false;
+
+        // If we previously saw that a feature was supported, we shouldn't have to check again.
+        if ((!skipCache || !userEnabledFeature) && vcpCache[monitor] && vcpCache[monitor]["vcp_" + vcpString]) return vcpCache[monitor]["vcp_" + vcpString];
+
+        const vcpResult = await checkVCP(monitor, code)
+        return vcpResult
+    } catch (e) {
+        console.log(`Error reading VCP code (if enabled) ${vcpString} for ${monitor}`, e)
+
+        // Since it failed, let's check for an existing value first
+        if(vcpCache[monitor]?.["vcp_" + vcpString]) {
+            return vcpCache[monitor]["vcp_" + vcpString]
+        }
+        
+        // Cached value can't be used, so we return false
+        return false
+    }
+}
+
+async function checkIfVCPSupported(monitor, code) {
+    const vcpString = vcpStr(code)
+    if(!code || code == "0x0") return false;
+    try {
+        const isInReport = monitorReports[monitor]?.[vcpString] ? true : false
+        const hasReport = monitorReports[monitor] && Object.keys(monitorReports[monitor])?.length > 0 ? true : false
+        
+        if (hasReport && !isInReport) return false;
+
+        // If we previously saw that a feature was supported, we shouldn't have to check again.
+        if (vcpCache[monitor] && vcpCache[monitor]["vcp_" + vcpString]) return true;
+
+        const vcpResult = await checkVCPIfEnabled(monitor, code)
+        return (vcpResult ? true : false)
+    } catch (e) {
+        console.log(`Error checking VCP code support ${vcpString} for ${monitor}`, e)
+        return false
+    }
+}
+
+async function checkVCP(monitor, code, skipCacheWrite = false, useCachedOnError = true) {
+    const vcpString = vcpStr(code)
+    if(!code || code == "0x0") return false;
+    try {
+        let result = ddcci._getVCP(monitor, parseInt(vcpString))
+        if (code === 96) return getMonitorInputs(monitor, result[0])
+        if (!skipCacheWrite) {
+            if (!vcpCache[monitor]) vcpCache[monitor] = {};
+            vcpCache[monitor]["vcp_" + vcpString] = result
+        }
+        if(settings.debugForceBrightnessMax && vcpString == "0x10") result[1] = settings.debugForceBrightnessMax; // Force lower max brightness for testing
+        await wait(parseInt(settings?.checkVCPWaitMS || 20))
+        return result
+    } catch (e) {
+        console.log(`Error reading VCP code ${vcpString} for ${monitor}. Reason: ${classifyDDCError(e)}`)
+
+        // Since it failed, let's check for an existing value first
+        if(useCachedOnError && vcpCache[monitor]?.["vcp_" + vcpString]) {
+            return vcpCache[monitor]["vcp_" + vcpString]
+        }
+        
+        // Cached value can't be used, so we return false
+        return false
+    }
+}
+
+// Input lists come from the capabilities string the last refresh left in the
+// native cache, so no refresh is needed for a monitor it found. The list is only
+// rebuilt when flushvcp cleared it after the handles were opened.
+function getMonitorInputs(monitor, currentInput) {
+    try {
+        return ddcci.getMonitorInputs(monitor, currentInput)
+    } catch (e) {
+        if (!e?.message?.startsWith("Monitor not found")) throw e
+    }
+    withDDCSentinel("refresh", false, () =>
+        ddcci._refresh(
+            (shouldEnrichCapabilities() ? "accurate" : determineDDCCIMethod()),
+            true,
+            !settings.disableHighLevel
+        )
+    )
+    return ddcci.getMonitorInputs(monitor, currentInput)
+}
+
+async function setVCP(monitor, code, value) {
+    if(busyLevel > 0) while(busyLevel > 0) { await wait(100) } // Wait until no longer busy
+    try {
+        const vcpString = vcpStr(code)
+        let result = ddcci._setVCP(monitor, code, (value * 1))
+        if (vcpCache[monitor]?.["vcp_" + vcpString]) {
+            vcpCache[monitor]["vcp_" + vcpString][0] = (value * 1)
+        }
+        
+        const hwid = monitor.split("#")
+        const updatedMonitor = monitors[hwid[2]]
+        if(updatedMonitor?.features?.[vcpString]) {
+            updatedMonitor.features[vcpString][0] = parseInt(value)
+            saveFeatureSnapshot(updatedMonitor)
+        }
+        return result
+    } catch (e) {
+        console.log(`Error setting VCP code ${vcpStr(code)} for ${monitor}. Reason: ${classifyDDCError(e)}`)
+        return false
+    }
+}
+
+async function getHighLevelBrightness(monitor) {   
+    try {
+        let result = ddcci._getHighLevelBrightness(monitor)
+        return result
+    } catch (e) {
+        console.log(e)
+        return false
+    }
+}
+
+async function setHighLevelBrightness(monitor, value) {
+    if(busyLevel > 0) while(busyLevel > 0) { await wait(100) } // Wait until no longer busy   
+    try {
+        let result = ddcci._setHighLevelBrightness(monitor, value)
+        return result
+    } catch (e) {
+        console.log(e)
+        return false
+    }
+}
+
+function normalizeBrightness(brightness, unnormalize = false, min = 0, max = 100) {
+    return brightness // Disabled because it wasn't working
+    // Clean this up later
+    // Really
+    // Do it
+    let level = brightness
+    if (level > 100) level = 100;
+    if (level < 0) level = 0;
+    if (min > 0 || max < 100) {
+        let out = level
+        if (!unnormalize) {
+            // Normalize
+            out = (min + ((level / 100) * (max - min)))
+        } else {
+            // Unnormalize
+            out = ((level - min) * (100 / (max - min)))
+        }
+        if (out > 100) out = 100;
+        if (out < 0) out = 0;
+
+        return Math.round(out)
+    } else {
+        return level
+    }
+}
+
+
+
+function applyRemap(monitor) {
+    if (settings.remaps) {
+        for (let remapName in settings.remaps) {
+            if (remapName == monitor.name || remapName == monitor.id) {
+                let remap = settings.remaps[remapName]
+                monitor.min = remap.min
+                monitor.max = remap.max
+                // Stop if using new scheme
+                if (remapName == monitor.id) return monitor;
+            }
+        }
+    }
+    if (typeof monitor.min === "undefined") monitor.min = 0;
+    if (typeof monitor.max === "undefined") monitor.max = 100;
+    return monitor
+}
+
+
+function readInstanceName(insName) {
+    return (insName ? insName.replace(/&amp;/g, '&').split("\\") : undefined)
+}
+
+function parseWMIString(str) {
+    if (str === null) return str;
+    let hexed = str.replace('{', '').replace('}', '').replace(/;0/g, ';32')
+    var decoded = '';
+    var split = hexed.split(';')
+    for (var i = 0; (i < split.length); i++)
+        decoded += String.fromCharCode(parseInt(split[i], 10));
+    decoded = decoded.trim()
+    return decoded;
+}
+
+let ddcci = false
+function getDDCCI() {
+    if (ddcci) return false;
+    try {
+        ddcci = require("@hensm/ddcci");
+        // Level 2 (verbose) in dev; level 1 (errors/warnings) otherwise, captured to the session log
+        ddcci._setLogLevel(isDev ? 2 : 1);
+        return true;
+    } catch (e) {
+        console.log('Couldn\'t start DDC/CI', e);
+        return false;
+    }
+}
+
+let wmicUnavailable = false 
+let wmi = false
+// WMIC.exe lives in the Wbem folder under System32. It is absent on Windows 11
+// builds where the deprecated feature is removed, or turned off as an optional feature.
+function getWMICPath() {
+    const systemRoot = process.env.SystemRoot || process.env.windir || "C:\\Windows"
+    return systemRoot + "\\System32\\Wbem\\WMIC.exe"
+}
+
+function wmicExists() {
+    return require('fs').existsSync(getWMICPath())
+}
+
+// WMIC
+function getWMIC() {
+    if (wmi) return true;
+    let WmiClient = false
+    if (!wmicExists()) {
+        console.log("\x1b[41mWARNING: WMIC unavailable! Using WMI Bridge instead.\x1b[0m")
+        wmicUnavailable = true
+        return false;
+    }
+    try {
+        if (isDev) {
+            WmiClient = require('wmi-client');
+        } else {
+            let path = process.argv.find((val) => { return (val.indexOf("--apppath=") >= 0) }).substring(10)
+            WmiClient = require(require('path').join(path, '../app.asar.unpacked/node_modules/wmi-client'));
+        }
+        wmi = new WmiClient({
+            host: 'localhost',
+            namespace: '\\\\root\\WMI',
+            wmic: getWMICPath() // Run the file that was checked, not whichever "wmic" is on PATH
+        });
+        return true;
+    } catch (e) {
+        console.log('Couldn\'t start WMI', e);
+        wmicUnavailable = true
+        return false;
+    }
+}
+// Check WMIC availability up front (without loading the client) so the
+// preferred-method selection works before the first WMIC query.
+if (!wmicExists()) {
+    console.log("\x1b[41mWARNING: WMIC unavailable! Using WMI Bridge instead.\x1b[0m")
+    wmicUnavailable = true
+}
+
+// Request Monitors via WMIC. (Windows 10 only)
+getMonitorsWMIC = () => {
+
+    return new Promise((resolve, reject) => {
+        const wmiOK = getWMIC();
+        if (!wmiOK) {
+            resolve(false);
+            return false;
+        }
+        wmi.query('SELECT * FROM WmiMonitorID', function (err, result) {
+            let foundMonitors = {}
+            if (err != null) {
+                resolve(false)
+            } else if (result) {
+                // Apply names
+
+                for (let monitor of result) {
+
+                    if (!monitor.InstanceName) continue;
+
+                    let hwid = readInstanceName(monitor.InstanceName)
+                    hwid[2] = hwid[2].split("_")[0]
+
+                    const wmiInfo = {
+                        id: `\\\\?\\${hwid[0]}#${hwid[1]}#${hwid[2]}`,
+                        key: hwid[2],
+                        hwid: hwid,
+                        serial: parseWMIString(monitor.SerialNumberID)
+                    }
+
+                    if (monitor.UserFriendlyName !== null && monitor.UserFriendlyName !== "") {
+                        wmiInfo.name = parseWMIString(monitor.UserFriendlyName)
+                    }
+
+                    foundMonitors[hwid[2]] = wmiInfo
+                }
+
+                resolve(foundMonitors)
+            } else {
+                resolve(foundMonitors)
+            }
+        });
+    })
+
+}
+
+// Request WMI brightness via WMIC. (Windows 10 only)
+const getBrightnessWMIC = async () => {
+
+    return new Promise((resolve, reject) => {
+        try {
+            const wmiOK = getWMIC();
+            if (!wmiOK) {
+                resolve(false);
+                return {};
+            }
+            wmi.query('SELECT * FROM WmiMonitorBrightness', function (err, result) {
+                if (err != null) {
+                    resolve(false)
+                } else if (result) {
+
+                    for (let monitor of result) {
+
+                        let hwid = readInstanceName(monitor.InstanceName)
+                        hwid[2] = hwid[2].split("_")[0]
+
+                        let wmiInfo = {
+                            id: `\\\\?\\${hwid[0]}#${hwid[1]}#${hwid[2]}`,
+                            brightness: monitor.CurrentBrightness,
+                            hwid: hwid,
+                            min: 0,
+                            max: 100,
+                            type: 'wmi',
+                        }
+
+                        // Get normalization info
+                        wmiInfo = applyRemap(wmiInfo)
+
+                        // Unnormalize brightness
+                        wmiInfo.brightnessRaw = wmiInfo.brightness
+                        wmiInfo.brightness = normalizeBrightness(wmiInfo.brightness, true, wmiInfo.min, wmiInfo.max)
+
+                        resolve(wmiInfo)
+                    }
+                    resolve(false)
+                } else {
+                    reject(false)
+                }
+            });
+
+        } catch (e) {
+            console.log(e)
+            resolve(false)
+        }
+    })
+
+}
+
+function wait(ms = 2000) {
+    return new Promise(resolve => {
+        setTimeout(() => {
+            resolve(true);
+        }, ms);
+    });
+}
+
+function vcpStr(code) {
+    return `0x${parseInt(code).toString(16).toUpperCase()}`
+}
+
+// Win32 error codes for DDC/CI failures (winerror.h), exposed by
+// node-ddcci as error.win32Code. Message strings from Windows are
+// localized, so failures are classified by code instead.
+const DDC_ERROR_REASONS = {
+    0xC0262580: "I2C not supported",                    // ERROR_GRAPHICS_I2C_NOT_SUPPORTED
+    0xC0262581: "I2C device does not exist",            // ERROR_GRAPHICS_I2C_DEVICE_DOES_NOT_EXIST
+    0xC0262582: "I2C bus error (transmit)",             // ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA
+    0xC0262583: "I2C bus error (receive)",              // ERROR_GRAPHICS_I2C_ERROR_RECEIVING_DATA
+    0xC0262584: "VCP code unsupported",                 // ERROR_GRAPHICS_DDCCI_VCP_NOT_SUPPORTED
+    0xC0262585: "invalid DDC/CI data",                  // ERROR_GRAPHICS_DDCCI_INVALID_DATA
+    0xC0262586: "invalid timing status byte",           // ERROR_GRAPHICS_DDCCI_MONITOR_RETURNED_INVALID_TIMING_STATUS_BYTE
+    0xC0262587: "invalid capabilities string",          // ERROR_GRAPHICS_MCA_INVALID_CAPABILITIES_STRING
+    0xC0262589: "invalid DDC/CI message command",       // ERROR_GRAPHICS_DDCCI_INVALID_MESSAGE_COMMAND
+    0xC026258A: "invalid DDC/CI message length",        // ERROR_GRAPHICS_DDCCI_INVALID_MESSAGE_LENGTH
+    0xC026258B: "invalid DDC/CI message checksum",      // ERROR_GRAPHICS_DDCCI_INVALID_MESSAGE_CHECKSUM
+    0xC026258C: "invalid physical monitor handle",      // ERROR_GRAPHICS_INVALID_PHYSICAL_MONITOR_HANDLE
+    0xC026258D: "monitor no longer exists"              // ERROR_GRAPHICS_MONITOR_NO_LONGER_EXISTS
+}
+
+function classifyDDCError(e) {
+    const code = e?.win32Code
+    if (code !== undefined && DDC_ERROR_REASONS[code]) {
+        return `${DDC_ERROR_REASONS[code]} (0x${(code >>> 0).toString(16).toUpperCase()})`
+    }
+    // Fallback for errors without an attached code
+    if (e?.message?.indexOf("the I2C bus") >= 0) return "I2C bus error";
+    if (e?.message?.indexOf("does not support") >= 0) return "VCP code unsupported";
+    return e
+}
+
+testDDCCIMethods = async () => {
+    let fastIsFine = false
+    try {
+        if(skipTest) {
+            console.log("Skipping DDC/CI test...")
+            return false
+        }
+        if(unstableDDC.downgraded) {
+            // The accurate test reads capabilities strings, which is what
+            // likely killed the previous session. Don't try it again.
+            console.log("Skipping DDC/CI test due to crash evidence from a previous session.")
+            return true
+        }
+
+        console.log("Testing DDC/CI methods...")
+        getDDCCI()
+
+        let startTime = process.hrtime.bigint()
+        const accurateResults = withDDCSentinel("method-test", false, () =>
+            ddcci.getAllMonitors("accurate", false)
+        )
+        const accurateIDs = []
+        const accurateFeatures = []
+        for(const monitor of accurateResults) {
+            if(monitor.ddcciSupported) {
+                accurateIDs.push(monitor.deviceKey)
+                accurateFeatures[monitor.deviceKey] = await checkMonitorFeatures(monitor.deviceKey)
+            }
+        }
+        const endTimeAcc = (startTime - process.hrtime.bigint()) / BigInt(-1000000)
+        
+        wait(50)
+        vcpCache = {}
+        monitorReports = {}
+        monitorReportsRaw = {}
+        ddcci._clearDisplayCache()
+    
+        startTime = process.hrtime.bigint()
+        const fastResults = withDDCSentinel("method-test", false, () =>
+            ddcci.getAllMonitors("fast", false)
+        )
+        const fastIDs = []
+        const fastFeatures = []
+        for(const monitor of fastResults) {
+            if(monitor.ddcciSupported) {
+                fastIDs.push(monitor.deviceKey)
+                fastFeatures[monitor.deviceKey] = await checkMonitorFeatures(monitor.deviceKey)
+            }
+        }
+        const endTimeFast = (startTime - process.hrtime.bigint()) / BigInt(-1000000)
+    
+        fastIsFine = true
+        let failReason
+        if(fastResults.length !== accurateResults.length) {
+            fastIsFine = false
+            failReason = "Display counts don't match!"
+        } else {
+            for(const id of accurateIDs) {
+                if(fastIDs.indexOf(id) === -1) {
+                    fastIsFine = false
+                    failReason = "Didn't find ID: " + id
+                }
+                if(JSON.stringify(fastFeatures[id]) != JSON.stringify(accurateFeatures[id])) {
+                    failReason = "Features don't match: " + id
+                }
+            }
+        }
+        console.log("-------------- DDC/CI Tests --------------")
+        console.log(`Accurate results took: ${endTimeAcc}ms`)
+        console.log(`Fast results took: ${endTimeFast}ms`)
+        console.log("Is fast fine?: " + fastIsFine)
+        if(failReason) console.log("Reason: " + fastIsFine);
+        if(!failReason) console.log(`Monitors: ${fastResults.length} | DDCCI: ${fastIDs.length}`);
+        console.log("------------------------------------------")
+        wait(50)
+    } catch(e) {
+        console.log("Error testing DDC/CI methods: ", e)
+    }
+
+    vcpCache = {}
+    monitorReports = {}
+    monitorReportsRaw = {}
+    ddcci._clearDisplayCache()
+    
+    return fastIsFine
+}
+
+
+// Auto now uses the same Fast-first/enrichment flow as Accurate, so probing
+// Accurate before the worker is ready would defeat the startup improvement.
+// Keep the legacy test helper available for diagnostics, but don't run it as
+// part of the worker bootstrap.
+let isFastFine = true
+process.send({
+    type: 'ready'
+})
+
+// Node does not await asynchronous EventEmitter listeners. Keep DDC/CI and
+// cache mutations in one worker-side queue so a late IPC message cannot
+// interleave with a refresh or a capabilities read.
+let monitorMessageQueue = Promise.resolve()
+process.on('message', data => {
+    monitorMessageQueue = monitorMessageQueue
+        .then(() => handleMonitorMessage(data))
+        .catch(e => console.log(e))
+})

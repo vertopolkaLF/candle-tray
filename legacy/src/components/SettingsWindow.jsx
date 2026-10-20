@@ -1,0 +1,2065 @@
+/*
+
+Hi,
+If you're reading this, you probably want to know how this component works.
+This component is not good. Mistakes were made.
+It's a horrible bowl of spaghetti.
+Run while you still can.
+
+*/
+
+import React, { PureComponent } from "react";
+import Titlebar from './Titlebar'
+import Slider from "./Slider";
+import { DragDropContext, Droppable, Draggable } from "react-beautiful-dnd";
+import Markdown from 'markdown-to-jsx';
+import TranslateReact from "../TranslateReact"
+import MonitorInfo from "./MonitorInfo"
+import MonitorFeatures from "./MonitorFeatures"
+import { SettingsOption, SettingsChild } from "./SettingsOption";
+import SafeRender from "./SafeRender";
+import { getMonitorName, isAdjustableDisplay, displayLevel } from './utilts/monitor.util';
+import { LightSensorSettings } from "./light-sensor/LightSensorSettings";
+
+import DefaultIcon from "../assets/tray-icons/dark/icon@4x.png"
+import MDL2Icon from "../assets/tray-icons/dark/mdl2@4x.png"
+import FluentIcon from "../assets/tray-icons/dark/fluent@4x.png"
+
+function vcpStr(code) {
+    return `0x${parseInt(code).toString(16).toUpperCase()}`
+}
+
+const uuid = () => crypto.randomUUID()
+
+const reorder = (list, startIndex, endIndex) => {
+    const result = Array.from(list);
+    const [removed] = result.splice(startIndex, 1);
+    result.splice(endIndex, 0, removed);
+    return result;
+};
+
+const getItemStyle = (isDragging, draggableStyle) => ({
+    userSelect: "none",
+    background: isDragging ? "rgba(122, 122, 122, 0.2)" : "none",
+    ...draggableStyle
+});
+
+const monitorSort = (a, b) => {
+    const aSort = (a.order === undefined ? 999 : a.order * 1)
+    const bSort = (b.order === undefined ? 999 : b.order * 1)
+    return aSort - bSort
+}
+
+const deleteIcon = (<span className="icon" dangerouslySetInnerHTML={{ __html: "&#xE74D;" }}></span>)
+
+const cleanUpKeyboardKeys = (inKey, inCode = false) => {
+    let key = inKey
+    let code = inCode
+
+    if (key.length == 1) {
+        key = key.toUpperCase()
+    }
+
+    switch (key) {
+        case "Meta":
+            key = "Super";
+            break;
+        case " ":
+            key = "Space";
+            break;
+        case "ArrowUp":
+            key = "Up";
+            break;
+        case "ArrowDown":
+            key = "Down";
+            break;
+        case "ArrowLeft":
+            key = "Left";
+            break;
+        case "ArrowRight":
+            key = "Right";
+            break;
+        case "+":
+            key = "Plus";
+            break;
+        case "-":
+            key = "Minus";
+            break;
+    }
+
+    if (code >= 96 && code <= 105) key = "num" + (code - 96);
+
+    switch (code) {
+        case 106: key = "nummult"; break;
+        case 107: key = "numadd"; break;
+        case 109: key = "numsub"; break;
+        case 110: key = "numdec"; break;
+        case 111: key = "numdiv"; break;
+    }
+
+    return key;
+}
+
+const defaultAction = {
+    type: "set",
+    target: "brightness",
+    monitors: {},
+    allMonitors: false,
+    value: 0,
+    values: [0],
+    id: uuid()
+}
+
+let T = new TranslateReact({}, {})
+
+// Portion of the slider handed to the gamma ramp by Extend Minimum Brightness
+const EXTEND_MINIMUM_BREAKPOINT_DEFAULT = 20
+const EXTEND_MINIMUM_BREAKPOINT_MIN = 5
+const EXTEND_MINIMUM_BREAKPOINT_MAX = 90
+
+export default class SettingsWindow extends PureComponent {
+
+    constructor(props) {
+        super(props)
+        this.state = {
+            rawSettings: {},
+            breakpointDrafts: {},
+            activePage: "general",
+            theme: 'default',
+            openAtLogin: false,
+            brightnessAtStartup: true,
+            monitors: [],
+            remaps: [],
+            names: [],
+            hotkeys: [],
+            adjustmentTimes: [],
+            linkedLevelsActive: false,
+            updateInterval: (window.settings.updateInterval || 500),
+            downloadingUpdate: false,
+            checkForUpdates: false,
+            adjustmentTimeIndividualDisplays: false,
+            languages: [],
+            analytics: false,
+            useAcrylic: true,
+            scrollShortcut: true,
+            updateProgress: 0,
+            extendedDDCCI: {
+                contrast: 50,
+                volume: 50,
+                powerState: 0
+            },
+            windowHistory: [],
+            showAddFeatureOverlay: false,
+            addFeatureMonitor: "",
+            addFeatureValue: "",
+            addFeatureError: false,
+            ddcSafetyStatus: false
+        }
+        this.numMonitors = 0
+        this.downKeys = {}
+        this.recordingHotkeyId = false
+        this.lastLevels = []
+        this.onDragEnd = this.onDragEnd.bind(this);
+        this.sendSettingsTimeout = false
+        this.sendSettingsValues = {}
+        this.settingsPageRef = React.createRef()
+        this.addFeatureInputRef = React.createRef()
+        this.addFeatureOKRef = React.createRef()
+        this.addFeatureCancelRef = React.createRef()
+    }
+
+    sendSettingsThrottle = (newSetting = {}) => {
+        this.sendSettingsValues = Object.assign(this.sendSettingsValues, newSetting)
+        if (this.sendSettingsTimeout) {
+            clearTimeout(this.sendSettingsTimeout)
+        }
+        this.sendSettingsTimeout = setTimeout(() => {
+            window.sendSettings(Object.assign({}, this.sendSettingsValues))
+            this.sendSettingsValues = {}
+        }, 2000)
+    }
+
+    componentDidMount() {
+        window.addEventListener("monitorsUpdated", this.recievedMonitors)
+        window.addEventListener("settingsUpdated", this.recievedSettings)
+        window.addEventListener("ddcSafetyStatus", this.recievedDDCSafetyStatus)
+        window.addEventListener("nativeBrightnessKey", this.recievedNativeBrightnessKey)
+        window.addEventListener("localizationUpdated", (e) => { this.setState({ languages: e.detail.languages });  T.setLocalizationData(e.detail.desired, e.detail.default)}); 
+        window.addEventListener("windowHistory", e => this.setState({ windowHistory: e.detail }))
+
+        if (window.isAppX === false) {
+            window.addEventListener("updateUpdated", (e) => {
+                const version = e.detail
+                this.setState({
+                    releaseURL: (window.isAppX ? "ms-windows-store://pdp/?productid=9PLJWWSV01LK" : version.releaseURL),
+                    latest: version.version,
+                    downloadURL: version.downloadURL,
+                    changelog: version.changelog,
+                    error: (version.error != undefined ? version.error : false)
+                })
+                if (e.detail.error == true) {
+                    this.setState({
+                        downloadingUpdate: false
+                    })
+                }
+            })
+            window.addEventListener("updateProgress", (e) => {
+                this.setState({
+                    updateProgress: e.detail.progress
+                })
+            })
+            window.checkForUpdates()
+        }
+        window.ipc.send('get-window-history')
+        window.ipc.send("sendSettingsWindowPos")
+        window.ipc.send('request-localization')
+        window.requestDDCSafetyStatus()
+        window.reactReady = true
+    }
+
+    componentWillUnmount() {
+        window.removeEventListener("nativeBrightnessKey", this.recievedNativeBrightnessKey)
+        window.ipc.send("set-native-hotkey-recording", false)
+    }
+
+
+
+    onDragEnd(result) {
+        // dropped outside the list
+        if (!result.destination) {
+            return;
+        }
+        // Keep the draggable list limited to monitors that can be displayed in
+        // the panel. Unsupported monitors can have a null `key`, while this
+        // collection itself is keyed independently of that value.
+        const sorted = Object.values(this.state.monitors)
+            .filter(monitor => isAdjustableDisplay(monitor))
+            .sort(monitorSort)
+        const items = reorder(
+            sorted,
+            result.source.index,
+            result.destination.index
+        );
+
+        const order = items.map(monitor => monitor.id)
+        const orderById = new Map(order.map((id, index) => [id, index]))
+        const monitors = Object.fromEntries(Object.entries(this.state.monitors).map(([key, monitor]) => [
+            key,
+            orderById.has(monitor.id)
+                ? { ...monitor, order: orderById.get(monitor.id) }
+                : monitor
+        ]))
+
+        this.setState({
+            monitors,
+            order
+        });
+
+        window.sendSettings({ order })
+    }
+
+
+
+    getRemap = (name) => {
+        if (this.state.remaps[name] === undefined) {
+            return {
+                isFallback: true,
+                min: 0,
+                max: 100,
+                calibration: []
+            }
+        }
+        return this.state.remaps[name]
+    }
+
+
+    minMaxChanged = (value, slider) => {
+
+        const name = slider.props.monitorID
+        let remaps = Object.assign({}, this.state.remaps)
+
+        if (remaps[name] === undefined) {
+            remaps[name] = {
+                min: 0,
+                max: 100,
+                calibration: []
+            }
+        }
+
+        if (slider.props.type == "min") {
+            remaps[name].min = value
+
+            // Keep within 10%, cap
+
+            if (remaps[name].min > remaps[name].max - 10) {
+                remaps[name].max = remaps[name].min + 10
+            }
+
+            if (remaps[name].max > 100) {
+                remaps[name].max = 100
+            }
+
+            if (remaps[name].min > remaps[name].max - 10) {
+                remaps[name].min = remaps[name].max - 10
+            }
+
+        } else if (slider.props.type == "max") {
+            remaps[name].max = value
+
+            // Keep within 10%, cap
+
+            if (remaps[name].min > remaps[name].max - 10) {
+                remaps[name].min = remaps[name].max - 10
+            }
+
+            if (remaps[name].min < 0) {
+                remaps[name].min = 0
+            }
+
+            if (remaps[name].min > remaps[name].max - 10) {
+                remaps[name].max = remaps[name].min + 10
+            }
+        }
+
+        const oldData = JSON.stringify(this.state.remaps);
+        const newData = JSON.stringify(remaps);
+        const hasChanged = (oldData == newData ? false : true);
+        //if(!hasChanged) return false;
+        this.setState({ remaps })
+        window.sendSettings({ remaps })
+    }
+
+    themeChanged = (event) => {
+        this.setState({ theme: event.target.value })
+        window.sendSettings({ theme: event.target.value })
+    }
+
+    updateIntervalChanged = (event) => {
+        this.setState({ updateInterval: event.target.value * 1 })
+        window.sendSettings({ updateInterval: event.target.value * 1 })
+    }
+
+    sleepActionChanged = (event) => {
+        window.sendSettings({ sleepAction: event.target.value })
+    }
+
+    monitorNameChange = (e, f) => {
+        const idx = e.currentTarget.dataset.key
+        this.state.names[window.allMonitors[idx].id] = e.currentTarget.value
+        this.forceUpdate()
+        window.sendSettings({ names: this.state.names })
+    }
+
+    getMonitorName = (monitor, renames) => {
+        if (Object.keys(renames).indexOf(monitor.id) >= 0 && renames[monitor.id] != "") {
+            return renames[monitor.id] + ` (${monitor.name})`
+        } else {
+            return monitor.name
+        }
+    }
+
+    getSidebar = () => {
+        const items = [
+            {
+                id: "general",
+                label: T.t("SETTINGS_SIDEBAR_GENERAL"),
+                icon: "&#xE713;"
+            },
+            {
+                id: "monitors",
+                label: T.t("SETTINGS_SIDEBAR_MONITORS"),
+                icon: "&#xE7F4;"
+            },
+            {
+                id: "features",
+                label: T.t("SETTINGS_SIDEBAR_FEATURES"),
+                icon: "&#xE9E9;"
+            },
+            {
+                id: "time",
+                label: T.t("SETTINGS_SIDEBAR_TIME"),
+                icon: "&#xE823;"
+            },
+            {
+                id: "hotkeys",
+                label: T.t("SETTINGS_SIDEBAR_HOTKEYS"),
+                icon: "&#xF210;"
+            },
+            {
+                id: "light-sensor",
+                label: T.t("SETTINGS_SIDEBAR_LIGHT_SENSOR"),
+                icon: "&#xE957;"
+            },
+            {
+                id: "updates",
+                label: T.t("SETTINGS_SIDEBAR_UPDATES"),
+                icon: "&#xE895;"
+            },
+            {
+                id: "debug",
+                label: "Debug",
+                icon: "&#xEBE8;",
+                type: "debug"
+            }
+        ]
+        return items.map((item, index) => {
+            return (<div key={item.id} className="item" data-active={this.isSection(item.id)} data-type={item.type || "none"} onClick={() => { this.setState({ activePage: item.id }); window.currentSettingsPage = item.id; this.scrollToTop(); window.reloadReactMonitors(); window.requestMonitors(); }}>
+                <div className="icon" dangerouslySetInnerHTML={{ __html: (item.icon || "&#xE770;") }}></div><div className="label">{item.label || `Item ${index}`}</div>
+            </div>)
+        })
+    }
+
+
+    getLanguages = () => {
+        if (this.state.languages && this.state.languages.length > 0) {
+            return this.state.languages.map((value, index) => {
+                return (<option key={value.id} value={value.id}>{value.name}</option>)
+            })
+        }
+    }
+
+    scrollToTop = () => {
+        try {
+            this.settingsPageRef.current.scrollTop = 0
+        } catch(e) { }
+    }
+
+
+    getUpdate = () => {
+        if (window.isAppX) {
+            return (
+                <p><a onClick={() => { window.openURL("ms-store") }}>{T.t("SETTINGS_UPDATES_MS_STORE")}</a></p>
+            )
+        } else {
+            if (this.state.latest && this.state.latest != window.version) {
+                return (
+                    <div>
+                        <p><b style={{ color: window.accent }}>{T.t("SETTINGS_UPDATES_AVAILABLE") + ` (${this.state.latest})`}</b></p>
+                        <div className="changelog">
+                            <h3>{this.state.latest}</h3>
+                            <Markdown options={{ forceBlock: true }}>{this.state.changelog}</Markdown>
+                        </div>
+                        <br />
+                        {this.getUpdateButton()}
+                    </div>
+                )
+            } else if (this.state.latest) {
+                return (
+                    <div>
+                        <p>{T.t("SETTINGS_UPDATES_NONE_AVAILABLE")}</p>
+                        <div className="changelog"><Markdown options={{ forceBlock: true }}>{this.state.changelog}</Markdown></div>
+                    </div>
+                )
+            }
+        }
+    }
+
+    getUpdateButton = () => {
+        if (this.state.downloadingUpdate) {
+            return (<div><p><b>{T.t("SETTINGS_UPDATES_DOWNLOADING")}</b></p><div className="progress-bar"><div style={{ width: `${this.state.updateProgress}%` }}></div></div></div>)
+        } else {
+            return (<a className="button" onClick={() => { window.getUpdate(); this.setState({ downloadingUpdate: true }) }}><span className="icon red vfix" style={{ paddingRight: "6px", display: (this.state.error ? "inline" : "none") }}>&#xE783;</span>{T.t("SETTINGS_UPDATES_DOWNLOAD", this.state.latest)}</a>)
+        }
+    }
+
+    getMinMaxMonitors = () => {
+        if (this.state.monitors == undefined || Object.keys(this.state.monitors).length == 0) {
+            return (<div className="no-displays-message">{T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")}<br /><br /></div>)
+        } else {
+            return Object.values(this.state.monitors).map((monitor, index) => {
+                if (monitor.type == "none") {
+                    return (<div key={monitor.name}></div>)
+                } else {
+                    // New method, by ID
+                    let remap = this.getRemap(monitor.id)
+                    // Old method, by name
+                    if (remap.isFallback) {
+                        remap = this.getRemap(monitor.name)
+                    }
+                    return (
+                        <SettingsOption key={monitor.id} icon="E7F4" title={getMonitorName(monitor, this.state.names)}>
+                            <SettingsChild content={
+                                <div className="input-row">
+                                    <div className="monitor-item">
+                                        <label>{T.t("GENERIC_MINIMUM")}</label>
+                                        <Slider key={monitor.id + ".min"} type="min" monitorID={monitor.id} level={remap.min} monitorName={monitor.name} monitortype={monitor.type} onChange={this.minMaxChanged} scrolling={false} height={"short"} />
+                                    </div>
+                                    <div className="monitor-item">
+                                        <label>{T.t("GENERIC_MAXIMUM")}</label>
+                                        <Slider key={monitor.id + ".max"} type="max" monitorID={monitor.id} level={remap.max} monitorName={monitor.name} monitortype={monitor.type} onChange={this.minMaxChanged} scrolling={false} height={"short"} />
+                                    </div>
+                                </div>
+                            } />
+                            <SettingsChild content={
+                                <div className="calibration-points-menu">
+                                    { this.getMonitorCalibration(monitor.id) }
+                                    <div className="input-row">
+                                        <div className="button" onClick={() => this.addCalibrationPoint(monitor.id)}>+ {T.t("GENERIC_CALIBRATION_POINT")}</div>
+                                    </div>
+                                </div>
+                            } />
+                        </SettingsOption>
+
+                    )
+                }
+            })
+        }
+    }
+
+    getMonitorCalibration = (monitorID) => {
+        const pointsElems = []
+
+        const remap = this.getRemap(monitorID)
+
+        if(remap) for(const pointIdx in remap.calibration) {
+            const point = remap.calibration[pointIdx]
+
+            pointsElems.push(
+                <div className="input-row" key={pointIdx}>
+                    <div className="monitor-item">
+                        <label>Input</label>
+                        <Slider level={point.input} onChange={(value) => this.updateCalibrationPoint(monitorID, pointIdx, "input", value)} scrolling={false} height={"short"} />
+                    </div>
+                    <div className="monitor-item">
+                        <label>Output</label>
+                        <Slider level={point.output} onChange={(value) => this.updateCalibrationPoint(monitorID, pointIdx, "output", value)} scrolling={false} height={"short"} />
+                    </div>
+                    <div style={{ display: "flex", alignItems: "flex-end" }}>
+                        <a className="add-new button button-primary block" onClick={() => this.deleteCalibrationPoint(monitorID, pointIdx)}>{ deleteIcon } <span>{T.t("GENERIC_DELETE")}</span></a>
+                    </div>
+                </div>
+            )
+        }
+        return pointsElems
+    }
+
+    addCalibrationPoint = (monitorID) => {
+        if (this.state.remaps[monitorID] === undefined) {
+            this.state.remaps[monitorID] = {
+                min: 0,
+                max: 100,
+                calibration: []
+            }
+        }
+
+        const remap = this.getRemap(monitorID)
+        if(remap) {
+            if(!remap.calibration) remap.calibration = [];
+            remap.calibration.push({ input: 0, output: 100 })
+            this.setState({ remaps: { ...this.state.remaps } })
+            window.sendSettings({ remaps: this.state.remaps })
+        }
+    }
+
+    updateCalibrationPoint = (monitorID, pointIdx, field, value) => {
+        const remap = this.getRemap(monitorID)
+        if(remap && remap.calibration[pointIdx]) {
+            remap.calibration[pointIdx][field] = value
+            this.setState({ remaps: { ...this.state.remaps } })
+            window.sendSettings({ remaps: this.state.remaps })
+        }
+    }
+
+    deleteCalibrationPoint = (monitorID, pointIdx) => {
+        const remap = this.getRemap(monitorID)
+        if(remap && remap.calibration[pointIdx]) {
+            remap.calibration.splice(pointIdx, 1)
+            this.setState({ remaps: { ...this.state.remaps } })
+            window.sendSettings({ remaps: this.state.remaps })
+        }
+    }
+
+    getRenameMonitors = () => {
+        if (this.state.monitors == undefined || Object.keys(this.state.monitors).length == 0) {
+            return (<SettingsChild content={<div className="no-displays-message">{T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")}<br /><br /></div>} />)
+        } else {
+            return Object.values(this.state.monitors).map((monitor, index) => {
+                if (!isAdjustableDisplay(monitor)) {
+                    return null
+                } else {
+                    return (
+                        <SettingsChild key={monitor.id} icon="E7F4" title={monitor.name} input={(
+                            <input type="text" placeholder={T.t("SETTINGS_MONITORS_ENTER_NAME")} data-key={monitor.key} onChange={this.monitorNameChange} value={(this.state.names[monitor.id] ? this.state.names[monitor.id] : "")}></input>
+                        )} />
+                    )
+                }
+            })
+        }
+    }
+
+
+    getReorderMonitors = () => {
+        if (this.state.monitors == undefined || this.numMonitors == 0) {
+            return (<div className="no-displays-message">{T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")}<br /><br /></div>)
+        } else {
+            const sorted = Object.values(this.state.monitors)
+                .filter(monitor => isAdjustableDisplay(monitor))
+                .sort(monitorSort)
+            return (
+                <DragDropContext onDragEnd={this.onDragEnd}>
+                    <Droppable droppableId="droppable">
+                        {(provided, snapshot) => (
+                            <div
+                                {...provided.droppableProps}
+                                ref={provided.innerRef}
+                            >
+                                {sorted.map((monitor, index) => {
+                                    return (
+                                        <Draggable key={monitor.id} draggableId={monitor.id} index={index}>
+                                            {(provided, snapshot) => (
+                                                <div
+                                                    ref={provided.innerRef}
+                                                    {...provided.draggableProps}
+                                                    {...provided.dragHandleProps}
+                                                    style={getItemStyle(
+                                                        snapshot.isDragging,
+                                                        provided.draggableProps.style
+                                                    )}
+                                                >
+                                                    <div className="sectionSubtitle"><div className="icon">&#xE7F4;</div><div>{getMonitorName(monitor, this.state.names)}</div></div>
+                                                </div>
+                                            )}
+                                        </Draggable>
+                                    )
+                                })}
+                                {provided.placeholder}
+                            </div>
+                        )}
+                    </Droppable>
+                </DragDropContext>
+            )
+
+        }
+    }
+
+    updateAdjustmentTime(time, idx) {
+        this.state.adjustmentTimes[idx] = Object.assign({}, time)
+        window.sendSettings({ adjustmentTimes: this.state.adjustmentTimes.slice() })
+        this.forceUpdate()
+    }
+
+    getAdjustmentTimes = () => {
+        if (this.state.adjustmentTimes == undefined || this.state.adjustmentTimes.length == 0) {
+            return (<div></div>)
+        } else {
+            const lat = parseFloat(window.settings.adjustmentTimeLatitude) ?? 0
+            const long = parseFloat(window.settings.adjustmentTimeLongitude) ?? 0
+            const canShowSunCalc = ((lat > 0 || lat < 0) && (long > 0 || long < 0))
+
+            return this.state.adjustmentTimes.map((time, index) => {
+                let timeElem = (
+                    <input type="time" min="00:00" max="23:59" onChange={(e) => {
+                        this.setAdjustmentTimeValue(index, e.target.value)
+                    }} value={time.time}></input>
+                )
+                if (time.useSunCalc) {
+                    const times = window.getSunCalcTimes(lat, long, time.offset)
+                    timeElem = (
+                        <div style={{display: "flex", alignItems: "flex-end", gap: "10px", flex: 1}}>
+                            <select style={{flex: 1}} value={time.sunCalc ?? "solarNoon"} onChange={e => {
+                                time.sunCalc = e.target.value
+                                this.updateAdjustmentTime(time, index)
+                            }}>
+                                <option value="dawn">Dawn ({times.dawn})</option>
+                                <option value="sunrise">Sunrise ({times.sunrise})</option>
+                                <option value="solarNoon">Solar Noon ({times.solarNoon})</option>
+                                <option value="goldenHour">Golden Hour ({times.goldenHour})</option>
+                                <option value="sunsetStart">Sunset Start ({times.sunsetStart})</option>
+                                <option value="sunset">Sunset ({times.sunset})</option>
+                                <option value="dusk">Dusk ({times.dusk})</option>
+                                <option value="night">Night ({times.night})</option>
+                            </select>
+                            <div style={{flexShrink: 0}}>
+                                <label style={{textTransform: "capitalize"}}>{T.t("SETTINGS_TIME_SUN_OFFSET")}</label>
+                                <input type="number" min="-1440" max="1440" step="1" style={{width: "120px"}} value={time.offset ?? 0} onChange={e => {
+                                    time.offset = e.target.value
+                                    this.updateAdjustmentTime(time, index)
+                                }} />
+                            </div>
+                        </div>
+                    )
+                }
+                return (
+                    <SettingsOption className="win10-has-background" key={index + "_" + time.time} content={
+                        <div className="input-row">
+                            {timeElem}
+                            <input type="button" className="button button-primary" style={{alignSelf: "flex-end"}} value={T.t("SETTINGS_TIME_REMOVE")} onClick={() => {
+                                this.state.adjustmentTimes.splice(index, 1)
+                                this.forceUpdate()
+                                this.adjustmentTimesUpdated()
+                            }} />
+                        </div>
+                    } input={
+                        <div className="inputToggle-generic" style={{display: (canShowSunCalc ? "flex" : "none"), marginTop: time.useSunCalc ? "27px" : "0px"}}>
+                            <input onChange={e => {
+                                time.useSunCalc = e.target.checked
+                                this.updateAdjustmentTime(time, index)
+                            }} checked={time.useSunCalc ?? false} data-checked={time.useSunCalc ?? false} type="checkbox" />
+                            <div className="text">{T.t("SETTINGS_TIME_USE_SUN_POSITION")}</div>
+                        </div>
+                    }>
+                        <SettingsChild>
+                            {this.getAdjustmentTimesMonitors(time, index)}
+                        </SettingsChild>
+                    </SettingsOption>
+                )
+            })
+        }
+
+    }
+
+    getAdjustmentTimesMonitors = (time, index) => {
+        if (this.state.adjustmentTimeIndividualDisplays) {
+            return Object.values(this.state.monitors).map((monitor, idx) => {
+                if (!isAdjustableDisplay(monitor)) {
+                    return (<div key={monitor.id + ".brightness"}></div>)
+                } else {
+                    let level = time.brightness
+                    if (this.state.adjustmentTimes[index] && this.state.adjustmentTimes[index].monitors && this.state.adjustmentTimes[index].monitors[monitor.id] >= 0) {
+                        level = this.state.adjustmentTimes[index].monitors[monitor.id]
+                    } else {
+                        // No value set, use shared value
+                        this.state.adjustmentTimes[index].monitors[monitor.id] = level
+                        this.adjustmentTimesUpdated()
+                    }
+                    return (<Slider key={monitor.id + ".brightness"} min={0} max={100} name={getMonitorName(monitor, this.state.names)} onChange={(value) => { this.getAdjustmentTimesMonitorsChanged(index, monitor, value) }} level={level} scrolling={false} />)
+                }
+            })
+        } else {
+            return (<Slider key={index + ".brightness"} name={T.t("GENERIC_ALL_DISPLAYS")} min={0} max={100} level={time.brightness} onChange={(value, slider) => { this.state.adjustmentTimes[index].brightness = value; this.forceUpdate(); this.adjustmentTimesUpdated() }} scrolling={false} />)
+        }
+    }
+
+    getAdjustmentTimesMonitorsChanged = (index, monitor, value) => {
+        if (this.state.adjustmentTimes[index].monitors === undefined) {
+            this.state.adjustmentTimes[index].monitors = {}
+        }
+        this.state.adjustmentTimes[index].monitors[monitor.id] = value
+        this.forceUpdate();
+        this.adjustmentTimesUpdated()
+    }
+
+
+    setAdjustmentTimeValue = (index, arr) => {
+        for (let i in arr) {
+            if (i < 2 && isNaN(arr[i])) return false;
+        }
+        this.state.adjustmentTimes[index].time = arr
+
+        //this.forceUpdate()
+        this.adjustmentTimesUpdated()
+    }
+
+    getHotkeyList = () => {
+
+        const deleteHotkeyAction = (idx, actionIdx) => {
+            try {
+                this.state.hotkeys[idx].actions.splice(actionIdx, 1)
+                window.sendSettings({ hotkeys: this.state.hotkeys.slice() })
+                this.forceUpdate()
+            } catch(e) {
+                console.log(e)
+            }
+        }
+
+        return this.state.hotkeys?.map?.((hotkey, idx) => {
+            return (
+                <SettingsOption className="win10-has-background" key={hotkey.id} content={
+                    <div className="row hotkey-combo-input">
+                        <input placeholder={T.t("SETTINGS_HOTKEYS_PRESS_KEYS_HINT")} value={hotkey.accelerator} type="text" readOnly={true} onFocus={() => {
+                            this.recordingHotkeyId = hotkey.id
+                            window.ipc.send("set-native-hotkey-recording", true)
+                        }} onBlur={() => {
+                            this.recordingHotkeyId = false
+                            this.downKeys = {}
+                            window.ipc.send("set-native-hotkey-recording", false)
+                        }} onKeyDown={
+                            (e) => {
+                                e.preventDefault()
+                                let key = cleanUpKeyboardKeys(e.key, e.keyCode)
+                                if (this.downKeys[key] === undefined) {
+                                    this.downKeys[key] = true;
+                                    hotkey.accelerator = Object.keys(this.downKeys).join('+')
+                                    this.updateHotkey(hotkey, idx);
+                                }
+                                return false
+                            }
+                        } onKeyUp={(e) => { delete this.downKeys[cleanUpKeyboardKeys(e.key, e.keyCode)] }} />
+                        <input type="button" value={T.t("GENERIC_CLEAR")} onClick={() => {
+                            this.downKeys = {}
+                            hotkey.accelerator = ""
+                            this.updateHotkey(hotkey, idx);
+                        }} />
+                        {this.getHotkeyStatusIcon(hotkey)}
+                    </div>
+                } expandable={true} input={
+                    <a className="button button-primary" onClick={() => this.deleteHotkey(idx)}>{ deleteIcon } <span>{T.t("GENERIC_DELETE")}</span></a>
+                }>
+                    { hotkey.actions?.map((action, actionIdx) => {
+                        return (
+                            <SettingsChild key={`${idx}-${actionIdx}`}>
+                                <ActionItem key={`${idx}-${actionIdx}`} title={`${T.t("SETTINGS_HOTKEY_ACTION")} #${actionIdx + 1}`} action={action} onChange={updatedAction => this.updateHotkeyAction(updatedAction, idx, actionIdx)} onDelete={() => { deleteHotkeyAction(idx, actionIdx) }} monitors={this.state.monitors} monitorNames={this.state.names} />
+                            </SettingsChild>
+                        )
+                    }) }
+                    <SettingsChild>
+                        <a className="button full-width" onClick={() => {
+                            if(!hotkey.actions?.length) {
+                                hotkey.actions = []
+                            }
+                            hotkey.actions.push(Object.assign({}, defaultAction))
+                            this.updateHotkey(hotkey, idx)
+                        }}>+ {T.t("SETTINGS_HOTKEY_ADD_ACTION")}</a>
+                    </SettingsChild>
+                </SettingsOption>
+            )
+        })
+    }
+
+    recievedNativeBrightnessKey = (e) => {
+        const idx = this.state.hotkeys.findIndex(hotkey => hotkey.id === this.recordingHotkeyId)
+        if(idx < 0) return;
+        this.downKeys = {}
+        const hotkey = this.state.hotkeys[idx]
+        hotkey.accelerator = e.detail
+        this.updateHotkey(hotkey, idx)
+    }
+
+    getHotkeyStatusIcon = hotkey => {
+        if (hotkey?.active) {
+            // Registration succeeding doesn't mean the keyboard sends these keys
+            const isNativeBrightnessKey = (hotkey.accelerator === "BrightnessUp" || hotkey.accelerator === "BrightnessDown")
+            return (<div className="status icon active" title={isNativeBrightnessKey ? T.t("SETTINGS_HOTKEYS_NATIVE_BRIGHTNESS_CHECK") : undefined}>&#xE73E;</div>)
+        } else {
+            return (<div className="status icon inactive"></div>)
+        }
+    }
+
+    updateHotkey(hotkey, idx) {
+        this.state.hotkeys[idx] = Object.assign({}, hotkey)
+        window.sendSettings({ hotkeys: this.state.hotkeys.slice() })
+        this.forceUpdate()
+    }
+
+    updateHotkeyAction(action, idx, actionIdx) {
+        this.state.hotkeys[idx].actions[actionIdx] = Object.assign({}, action)
+        window.sendSettings({ hotkeys: this.state.hotkeys.slice() })
+        this.forceUpdate()
+    }
+
+    deleteHotkey(idx) {
+        this.state.hotkeys.splice(idx, 1)
+        window.sendSettings({ hotkeys: this.state.hotkeys.slice() })
+        this.forceUpdate()
+    }
+
+
+    getInfoMonitors = () => {
+        if (this.state.monitors == undefined || Object.keys(this.state.monitors).length == 0) {
+            return (<div className="no-displays-message">{T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")}<br /><br /></div>)
+        } else {
+            return Object.values(this.state.monitors).map((monitor, index) => {
+
+                let brightness = displayLevel(monitor.brightness)
+                let brightnessMax = monitor.brightnessMax
+
+                if (monitor.type == "ddcci" && !monitor.brightnessType) {
+                    brightness = "???"
+                    brightnessMax = "???"
+                }
+
+                return (
+                    <div key={monitor.key} className="monitorItem">
+                        <br />
+                        <div className="sectionSubtitle"><div className="icon">&#xE7F4;</div><div>{monitor.name}</div></div>
+                        <p>{T.t("SETTINGS_MONITORS_DETAILS_NAME")}: <b>{getMonitorName(monitor, this.state.names)}</b>
+                            <br />{T.t("SETTINGS_MONITORS_DETAILS_INTERNAL_NAME")}: <b>{monitor.hwid[1]}</b>
+                            <br />{T.t("SETTINGS_MONITORS_DETAILS_COMMUNICATION")}: {this.getDebugMonitorType((monitor.type === "ddcci" && monitor.highLevelSupported?.brightness ? "ddcci-hl" : monitor.type))}
+                            <br />{T.t("SETTINGS_MONITORS_DETAILS_BRIGHTNESS")}: <b>{(monitor.type == "none" ? T.t("GENERIC_NOT_SUPPORTED") : brightness)}</b>
+                            <br />{T.t("SETTINGS_MONITORS_DETAILS_MAX_BRIGHTNESS")}: <b>{(monitor.type !== "ddcci" && monitor.type !== "software" ? T.t("GENERIC_NOT_SUPPORTED") : brightnessMax)}</b>
+                            <br />{T.t("SETTINGS_MONITORS_DETAILS_BRIGHTNESS_NORMALIZATION")}: <b>{(monitor.type == "none" ? T.t("GENERIC_NOT_SUPPORTED") : monitor.min + " - " + monitor.max)}</b>
+                            <br />{T.t("SETTINGS_MONITORS_DETAILS_HDR")}: <b>{(monitor.hdr == "active" ? T.t("GENERIC_ACTIVE") : monitor.hdr == "supported" ? T.t("GENERIC_SUPPORTED") : T.t("GENERIC_UNSUPPORTED"))}</b>
+                        </p>
+                    </div>
+                )
+            })
+        }
+    }
+
+
+    getDebugMonitors = () => {
+        if (this.state.monitors == undefined || Object.keys(this.state.monitors).length == 0) {
+            return (<div className="no-displays-message">{T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")}<br /><br /></div>)
+        } else {
+            return Object.values(this.state.monitors).map((monitor, index) => {
+
+                return (
+                    <MonitorInfo key={monitor.key} name={getMonitorName(monitor, this.state.names)} monitor={monitor} debug={true} />
+                )
+
+            })
+        }
+    }
+
+    getFeaturesMonitors = () => {
+        try {
+            const onChange = () => {
+                window.sendSettings({ monitorFeaturesSettings: JSON.parse(JSON.stringify(window.settings.monitorFeaturesSettings)) })
+            }
+            if (this.state.monitors == undefined || Object.keys(this.state.monitors).length == 0) {
+                return (<div className="no-displays-message">{T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")}<br /><br /></div>)
+            } else {
+                return Object.values(this.state.monitors).map((monitor, index) => {
+                    const features = this.state?.rawSettings.monitorFeatures[monitor.hwid[1]]
+                    return (
+                        <MonitorFeatures key={monitor.key} name={getMonitorName(monitor, this.state.names)} monitor={monitor} monitorFeatures={features} toggleFeature={this.toggleFeature} T={T} onChange={onChange} onAddFeature={() => {
+                            this.setState({
+                                showAddFeatureOverlay: true,
+                                addFeatureMonitor: monitor.hwid[1],
+                                addFeatureValue: "",
+                                addFeatureError: false
+                            }, () => {
+                                this.addFeatureInputRef.current.focus()
+                            })
+                        }} />
+                    )
+
+                })
+            }
+        } catch (e) {
+
+        }
+    }
+
+    getHDRMonitors = () => {
+        try {
+            if (this.state.monitors == undefined || Object.keys(this.state.monitors).length == 0) {
+                return (<SettingsChild title={T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")} />)
+            } else {
+                return Object.values(this.state.monitors).map((monitor, index) => {
+
+                    return (
+                        <SettingsChild key={monitor.key} icon="E7F4" title={getMonitorName(monitor, this.state.names)} input={
+                            <div className="inputToggle-generic">
+                                <input onChange={(e) => { this.setHDRMonitor(e.target.checked, monitor) }} checked={(this.state.rawSettings?.hdrDisplays?.[monitor.key] ? true : false)} data-checked={(this.state.rawSettings?.hdrDisplays?.[monitor.key] ? true : false)} type="checkbox" />
+                            </div>
+                        } />
+                    )
+
+                })
+            }
+        } catch (e) {
+            console.log(e)
+        }
+    }
+
+    getExtendMinimumMonitorsSettings = () => {
+        try {
+            if (this.state.monitors == undefined || Object.keys(this.state.monitors).length == 0) {
+                return (<SettingsChild title={T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")} />)
+            } else {
+                return Object.values(this.state.monitors).map((monitor, index) => {
+                    const enabled = (this.state.rawSettings?.extendMinimumDisplays?.[monitor.key] ? true : false)
+
+                    return (
+                        <SettingsChild key={monitor.key} className="breakpoint-child" icon="E7F4" title={getMonitorName(monitor, this.state.names)} description={this.getGammaHDRNotice(monitor)} input={
+                            <>
+                                <div className="breakpoint-field" data-enabled={enabled} title={T.t("SETTINGS_MONITORS_EXTEND_MINIMUM_BREAKPOINT")}>
+                                    <input type="number" min={EXTEND_MINIMUM_BREAKPOINT_MIN} max={EXTEND_MINIMUM_BREAKPOINT_MAX} disabled={!enabled} value={this.state.breakpointDrafts[monitor.key] ?? this.getExtendMinimumBreakpoint(monitor)} onChange={(e) => { this.setExtendMinimumBreakpointDraft(e.target.value, monitor) }} onBlur={(e) => { this.setExtendMinimumBreakpoint(e.target.value, monitor) }} onKeyDown={(e) => { if (e.key === "Enter") e.target.blur() }} />
+                                    <div className="suffix">%</div>
+                                </div>
+                                <div className="inputToggle-generic">
+                                    <input onChange={(e) => { this.setExtendMinimumMonitor(e.target.checked, monitor) }} checked={enabled} data-checked={enabled} type="checkbox" />
+                                </div>
+                            </>
+                        } />
+                    )
+
+                })
+            }
+        } catch (e) {
+            console.log(e)
+        }
+    }
+
+    // Gamma ramps don't apply in HDR, so main skips these features until it's off.
+    // The toggle stays usable so the setting can still be changed.
+    getGammaHDRNotice = (monitor) => {
+        return (monitor?.hdr === "active" ? T.t("SETTINGS_MONITORS_GAMMA_HDR_UNAVAILABLE") : undefined)
+    }
+
+    getGammaMonitorsSettings = () => {
+        try {
+            if (this.state.monitors == undefined || Object.keys(this.state.monitors).length == 0) {
+                return (<SettingsChild title={T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")} />)
+            } else {
+                return Object.values(this.state.monitors).map((monitor, index) => {
+
+                    return (
+                        <SettingsChild key={monitor.key} icon="E7F4" title={getMonitorName(monitor, this.state.names)} description={this.getGammaHDRNotice(monitor)} input={
+                            <div className="inputToggle-generic">
+                                <input onChange={(e) => { this.setGammaMonitor(e.target.checked, monitor) }} checked={(this.state.rawSettings?.gammaAsMainSliderDisplays?.[monitor.key] ? true : false)} data-checked={(this.state.rawSettings?.gammaAsMainSliderDisplays?.[monitor.key] ? true : false)} type="checkbox" />
+                            </div>
+                        } />
+                    )
+
+                })
+            }
+        } catch (e) {
+            console.log(e)
+        }
+    }
+
+    getSDRMonitorsSettings = () => {
+                try {
+            if (this.state.monitors == undefined || Object.keys(this.state.monitors).length == 0) {
+                return (<SettingsChild title={T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")} />)
+            } else {
+                return Object.values(this.state.monitors).map((monitor, index) => {
+
+                    return (
+                        <SettingsChild key={monitor.key} icon="E7F4" title={getMonitorName(monitor, this.state.names)} input={
+                            <div className="inputToggle-generic">
+                                <input onChange={(e) => { this.setSDRMonitor(e.target.checked, monitor) }} checked={(this.state.rawSettings?.sdrAsMainSliderDisplays?.[monitor.key] ? true : false)} data-checked={(this.state.rawSettings?.sdrAsMainSliderDisplays?.[monitor.key] ? true : false)} type="checkbox" />
+                            </div>
+                        } />
+                    )
+
+                })
+            }
+        } catch (e) {
+            console.log(e)
+        }
+    }
+
+    setHDRMonitor = (value, monitor) => {
+        const hdrDisplays = Object.assign({}, this.state.rawSettings?.hdrDisplays)
+        hdrDisplays[monitor.key] = value
+        this.setSetting("hdrDisplays", hdrDisplays)
+    }
+
+    getExtendMinimumBreakpoint = (monitor) => {
+        const breakpoint = this.state.rawSettings?.extendMinimumBreakpoints?.[monitor.key]
+        return (breakpoint === undefined ? EXTEND_MINIMUM_BREAKPOINT_DEFAULT : breakpoint)
+    }
+
+    setExtendMinimumMonitor = (value, monitor) => {
+        const extendMinimumDisplays = Object.assign({}, this.state.rawSettings?.extendMinimumDisplays)
+        extendMinimumDisplays[monitor.key] = value
+        this.setSetting("extendMinimumDisplays", extendMinimumDisplays)
+    }
+
+    // Keep what's being typed local. Saving remaps the display's slider, so a
+    // partly typed number shouldn't be applied or clamped out from under the user.
+    setExtendMinimumBreakpointDraft = (value, monitor) => {
+        this.setState({ breakpointDrafts: { ...this.state.breakpointDrafts, [monitor.key]: value } })
+    }
+
+    // Commit once the user is done editing
+    setExtendMinimumBreakpoint = (value, monitor) => {
+        const breakpointDrafts = { ...this.state.breakpointDrafts }
+        delete breakpointDrafts[monitor.key]
+        this.setState({ breakpointDrafts })
+
+        const parsed = parseInt(value)
+        const breakpoint = Math.min(EXTEND_MINIMUM_BREAKPOINT_MAX, Math.max(EXTEND_MINIMUM_BREAKPOINT_MIN, (parsed > 0 ? parsed : EXTEND_MINIMUM_BREAKPOINT_DEFAULT)))
+        if (breakpoint === parseInt(this.getExtendMinimumBreakpoint(monitor))) return // Unchanged, so avoid a pointless refresh
+
+        const extendMinimumBreakpoints = Object.assign({}, this.state.rawSettings?.extendMinimumBreakpoints)
+        extendMinimumBreakpoints[monitor.key] = breakpoint
+        this.setSetting("extendMinimumBreakpoints", extendMinimumBreakpoints)
+    }
+
+    setGammaMonitor = (value, monitor) => {
+        const gammaDisplays = Object.assign({}, this.state.rawSettings?.gammaAsMainSliderDisplays)
+        gammaDisplays[monitor.key] = value
+        this.setSetting("gammaAsMainSliderDisplays", gammaDisplays)
+    }
+
+    setSDRMonitor = (value, monitor) => {
+        const sdrDisplays = Object.assign({}, this.state.rawSettings?.sdrAsMainSliderDisplays)
+        sdrDisplays[monitor.key] = value
+        this.setSetting("sdrAsMainSliderDisplays", sdrDisplays)
+    }
+
+    getHideMonitors = () => {
+        try {
+            if (this.state.monitors == undefined || Object.keys(this.state.monitors).length == 0) {
+                return (<SettingsChild title={T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")} />)
+            } else {
+                return Object.values(this.state.monitors).map((monitor, index) => {
+
+                    return (
+                        <SettingsChild key={monitor.key} icon="E7F4" title={getMonitorName(monitor, this.state.names)} input={
+                            <div className="inputToggle-generic">
+                                <input onChange={(e) => { this.setHideMonitor(e.target.checked, monitor) }} checked={(this.state.rawSettings?.hideDisplays?.[monitor.key] ? true : false)} data-checked={(this.state.rawSettings?.hideDisplays?.[monitor.key] ? true : false)} type="checkbox" />
+                            </div>
+                        } />
+                    )
+
+                })
+            }
+        } catch (e) {
+            console.log(e)
+        }
+    }
+
+    setHideMonitor = (value, monitor) => {
+        const hideDisplays = Object.assign({}, this.state.rawSettings?.hideDisplays)
+        hideDisplays[monitor.key] = value
+        this.setSetting("hideDisplays", hideDisplays)
+    }
+
+    toggleFeature = (monitor, featureRaw) => {
+        const feature = `0x${parseInt(featureRaw).toString(16).toUpperCase()}`
+
+        if (feature === "0x10" || feature === "0x13") return false; // Skip brightness
+        if (feature === "0x" || feature === "0xNaN") return false; // Skip invalid
+
+        const newFeatures = Object.assign({}, this.state.rawSettings.monitorFeatures)
+        if (!newFeatures[monitor]) newFeatures[monitor] = {};
+        newFeatures[monitor][feature] = (newFeatures[monitor][feature] ? false : true);
+
+        window.sendSettings({ monitorFeatures: newFeatures })
+    }
+
+    getDebugMonitorType = (type) => {
+        if (type == "none") {
+            return (<><b>None</b> <span className="icon red vfix">&#xEB90;</span></>)
+        } else if (type == "ddcci") {
+            return (<><b>DDC/CI</b> <span className="icon green vfix">&#xE73D;</span></>)
+        } else if (type == "ddcci-hl") {
+            return (<><b>DDC/CI (HL)</b> <span className="icon green vfix">&#xE73D;</span></>)
+        } else if (type == "wmi") {
+            return (<><b>WMI</b> <span className="icon green vfix">&#xE73D;</span></>)
+        } else if (type == "software") {
+            return (<><b>Software (Gamma)</b> <span className="icon green vfix">&#xE73D;</span></>)
+        } else if (type == "studio-display") {
+            return (<><b>Studio Display</b> <span className="icon green vfix">&#xE73D;</span></>)
+        } else {
+            return (<><b>Unknown ({type})</b> <span className="icon red vfix">&#xEB90;</span></>)
+        }
+    }
+
+    getSkipRestoreMonitors = () => {
+        try {
+            if (this.state.monitors == undefined || Object.keys(this.state.monitors).length == 0) {
+                return (<SettingsChild title={T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")} />)
+            } else {
+                return Object.values(this.state.monitors).map((monitor, index) => {
+
+                    return (
+                        <SettingsChild key={monitor.key} icon="E7F4" title={getMonitorName(monitor, this.state.names)} input={
+                            <div className="inputToggle-generic">
+                                <input onChange={(e) => { this.setSkipRestoreMonitor(e.target.checked, monitor) }} checked={(this.state.rawSettings?.userSkipReapply?.indexOf(monitor.hwid[1]) >= 0 ? true : false)} data-checked={(this.state.rawSettings?.userSkipReapply?.indexOf(monitor.hwid[1]) >= 0 ? true : false)} type="checkbox" />
+                            </div>
+                        } />
+                    )
+
+                })
+            }
+        } catch (e) {
+            console.log(e)
+        }
+    }
+
+    setSkipRestoreMonitor = (value, monitor) => {
+        const userSkipReapply = this.state.rawSettings?.userSkipReapply
+        const index = this.state.rawSettings?.userSkipReapply?.indexOf(monitor.hwid[1])
+        if(index >= 0 && !value) {
+            userSkipReapply.splice(index, 1)
+        } else if(index === -1 && value) {
+            userSkipReapply.push(monitor.hwid[1])
+        }
+        this.setSetting("userSkipReapply", userSkipReapply)
+    }
+
+
+
+
+
+
+    // Update monitor info
+    recievedMonitors = (e) => {
+        let newMonitors = Object.assign(e.detail, {})
+        this.lastLevels = []
+        let numMonitors = 0
+        for (let key in newMonitors) {
+            if (isAdjustableDisplay(newMonitors[key])) numMonitors++;
+        }
+        this.numMonitors = numMonitors
+        this.setState({
+            monitors: newMonitors
+        })
+    }
+
+    // Update settings
+    recievedSettings = (e) => {
+        const settings = e.detail
+        const openAtLogin = settings.openAtLogin
+        const brightnessAtStartup = settings.brightnessAtStartup
+        const linkedLevelsActive = (settings.linkedLevelsActive || false)
+        const updateInterval = (settings.updateInterval || 500) * 1
+        const remaps = (settings.remaps || {})
+        const names = (settings.names || {})
+        const adjustmentTimes = (settings.adjustmentTimes || {})
+        const killWhenIdle = (settings.killWhenIdle || false)
+        const order = (settings.order || [])
+        const checkTimeAtStartup = (settings.checkTimeAtStartup || false)
+        const checkForUpdates = (settings.checkForUpdates || false)
+        const adjustmentTimeIndividualDisplays = (settings.adjustmentTimeIndividualDisplays || false)
+        const language = (settings.language || "system")
+        const hotkeys = (settings.hotkeys || [])
+        const hotkeyPercent = (settings.hotkeyPercent || 10)
+        const analytics = settings.analytics
+        const useAcrylic = settings.useAcrylic
+        const scrollShortcut = settings.scrollShortcut
+        this.setState({
+            rawSettings: (Object.keys(settings).length > 0 ? settings : this.state.rawSettings),
+            openAtLogin,
+            brightnessAtStartup,
+            linkedLevelsActive,
+            remaps,
+            updateInterval,
+            names,
+            adjustmentTimes,
+            killWhenIdle,
+            order,
+            checkTimeAtStartup,
+            checkForUpdates,
+            adjustmentTimeIndividualDisplays,
+            language,
+            hotkeys,
+            hotkeyPercent,
+            analytics,
+            useAcrylic,
+            scrollShortcut
+        }, () => {
+            this.forceUpdate()
+        })
+    }
+
+    recievedDDCSafetyStatus = (e) => {
+        this.setState({ ddcSafetyStatus: e.detail || false })
+    }
+
+
+    isSection = (name) => {
+        if (this.state.activePage == name) {
+            return true
+        } else {
+            return false
+        }
+    }
+
+    isIcon = (icon) => (this.state.rawSettings.icon === icon ? true : false)
+
+    addAdjustmentTime = () => {
+        this.state.adjustmentTimes.push({
+            brightness: 50,
+            time: "12:30",
+            monitors: {},
+            useSunCalc: false,
+            sunCalc: "sunrise",
+            offset: 0
+        })
+        this.forceUpdate()
+        this.adjustmentTimesUpdated()
+    }
+
+    adjustmentTimesUpdated = () => {
+        this.setState({ adjustmentTimes: this.state.adjustmentTimes.slice(0) })
+        this.sendSettingsThrottle({ adjustmentTimes: this.state.adjustmentTimes.slice(0) })
+        //window.sendSettings({ adjustmentTimes: this.state.adjustmentTimes })
+    }
+
+    setSetting = (setting, sentVal) => {
+        let value = sentVal;
+        if (sentVal === "on") value = true;
+        if (sentVal === "off") value = false;
+
+        const newState = {}
+        newState[setting] = value
+        this.setState({...newState, ...{rawSettings: {...this.state.rawSettings, ...{[setting]: value} } } })
+        window.sendSettings(newState)
+    }
+
+    renderToggle = (setting, showText = true, textSide = "right", inverse = false) => {
+        const isActive = (this.state.rawSettings?.[setting] ? true : false)
+        const isVisiblyActive = (inverse ? !isActive : isActive)
+        return (<div className="inputToggle-generic" data-textside={textSide}>
+            <input onChange={(e) => { this.setSetting(setting, e.target.checked) }} checked={isActive} data-checked={isVisiblyActive} type="checkbox" />
+            <div className="text">{(isVisiblyActive ? T.t("GENERIC_ON") : T.t("GENERIC_OFF"))}</div>
+        </div>)
+    }
+
+    render() {
+        const hasNativeBrightnessHotkey = this.state.hotkeys?.some(hotkey => (
+            hotkey.accelerator === "BrightnessUp" || hotkey.accelerator === "BrightnessDown"
+        ))
+
+        return (
+            <SafeRender>
+                <div className="window-base" data-theme={window.settings.theme || "default"}>
+                    <Titlebar title={T.t("SETTINGS_TITLE")} />
+                    <div className="window-base-inner">
+                        <div id="sidebar">
+                            {this.getSidebar()}
+                        </div>
+                        <div id="page" ref={this.settingsPageRef}>
+
+                            <SettingsPage current={this.state.activePage} id="general">
+                                <div className="pageSection">
+
+                                    <div className="sectionTitle">{T.t("SETTINGS_GENERAL_TITLE")}</div>
+                                    
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_STARTUP")} input={this.renderToggle("openAtLogin")} />
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_BRIGHTNESS_STARTUP_TITLE")} description={T.t("SETTINGS_GENERAL_BRIGHTNESS_STARTUP_DESC")} input={this.renderToggle("brightnessAtStartup")} />
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_DISABLE_ON_LOCK_SCREEN_TITLE")} description={T.t("SETTINGS_GENERAL_DISABLE_ON_LOCK_SCREEN_DESC")} input={this.renderToggle("disableOnLockScreen")} />
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_LANGUAGE_TITLE")} input={(
+                                        <select value={window.settings.language} onChange={(e) => {
+                                            this.setState({ language: e.target.value })
+                                            window.sendSettings({ language: e.target.value })
+                                        }}>
+                                            <option value="system">{T.t("SETTINGS_GENERAL_LANGUAGE_SYSTEM")}</option>
+                                            {this.getLanguages()}
+                                        </select>
+                                    )} />
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_THEME_TITLE")} input={(
+                                        <select value={window.settings.theme} onChange={this.themeChanged}>
+                                            <option value="default">{T.t("SETTINGS_GENERAL_THEME_SYSTEM")}</option>
+                                            <option value="dark">{T.t("SETTINGS_GENERAL_THEME_DARK")}</option>
+                                            <option value="light">{T.t("SETTINGS_GENERAL_THEME_LIGHT")}</option>
+                                        </select>
+                                    )} />
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_WINDOWS_UI_STYLE_TITLE")} input={(
+                                        <select value={window.settings.windowsStyle} onChange={(e) => this.setSetting("windowsStyle", e.target.value)}>
+                                            <option value="system">{T.t("SETTINGS_GENERAL_THEME_SYSTEM")}</option>
+                                            <option value="win10">Windows 10</option>
+                                            <option value="win11">Windows 11</option>
+                                        </select>
+                                    )} />
+
+                                    <div className="win10only">
+                                        <SettingsOption title={T.t("SETTINGS_GENERAL_ACRYLIC_TITLE")} description={T.t("SETTINGS_GENERAL_ACRYLIC_DESC")} input={this.renderToggle("useAcrylic")} />
+                                    </div>
+
+                                    <div className="win11only">
+                                        <SettingsOption title={T.t("SETTINGS_GENERAL_MICA_TITLE")} description={T.t("SETTINGS_GENERAL_MICA_DESC")} input={this.renderToggle("useAcrylic")} />
+                                    </div>
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_TRAY_ICON_TITLE")} input={(
+                                        <div className="icons-row">
+                                            <div className="icon-option" data-active={this.isIcon("icon")} onClick={() => window.sendSettings({ icon: "icon" })}>
+                                                <img src={DefaultIcon} />
+                                            </div>
+                                            <div className="icon-option" data-active={this.isIcon("mdl2")} onClick={() => window.sendSettings({ icon: "mdl2" })}>
+                                                <img src={MDL2Icon} />
+                                            </div>
+                                            <div className="icon-option" data-active={this.isIcon("fluent")} onClick={() => window.sendSettings({ icon: "fluent" })}>
+                                                <img src={FluentIcon} />
+                                            </div>
+                                        </div>
+                                    )} />
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_ANALYTICS_TITLE")} description={T.h("SETTINGS_GENERAL_ANALYTICS_DESC", '<a href="javascript:window.openURL(\'privacy-policy\')">' + T.t("SETTINGS_GENERAL_ANALYTICS_LINK") + '</a>')} input={this.renderToggle("analytics")} />
+
+                                </div>
+
+                                <div className="pageSection">
+                                    <div className="sectionTitle">{T.t("SETTINGS_GENERAL_TROUBLESHOOTING")}</div>
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_DIS_MONITOR_FEATURES_TITLE")} description={T.h("SETTINGS_GENERAL_DIS_MONITOR_FEATURES_DESC", '<a href="javascript:window.openURL(\'troubleshooting-features\')">' + T.t("SETTINGS_GENERAL_ANALYTICS_LINK") + '</a>')} expandable={true}>
+                                        <SettingsChild title={"Apple Studio Displays"} input={this.renderToggle("disableAppleStudio", true, "right", true)} />
+                                        <SettingsChild title={"DDC/CI HL"} input={this.renderToggle("disableHighLevel", true, "right", true)} />
+                                        <SettingsChild title={"HDR"} input={this.renderToggle("disableHDR", true, "right", true)} />
+                                        <SettingsChild title={"WMIC"} input={this.renderToggle("disableWMIC", true, "right", true)} />
+                                        <SettingsChild title={"WMI-Bridge"} input={this.renderToggle("disableWMI", true, "right", true)} />
+                                        <SettingsChild title={"Win32-DisplayConfig"} input={this.renderToggle("disableWin32", true, "right", true)} />
+                                    </SettingsOption>
+
+                                   <SettingsOption title={T.t("SETTINGS_GENERAL_LEGACY_DDC_TITLE")} description={T.t("SETTINGS_GENERAL_LEGACY_DDC_DESC")} input={
+                                        <div className="inputToggle-generic" data-textside={"right"}>
+                                            <input onChange={(e) => { this.setSetting("preferredDDCCIMethod", (e.target.checked ? "legacy" : "accurate")) }} checked={(this.state.rawSettings.preferredDDCCIMethod == "legacy")} data-checked={(this.state.rawSettings.preferredDDCCIMethod == "legacy")} type="checkbox" />
+                                            <div className="text">{((this.state.rawSettings.preferredDDCCIMethod == "legacy") ? T.t("GENERIC_ON") : T.t("GENERIC_OFF"))}</div>
+                                        </div>
+                                    } />
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_OVERLAY_TITLE")} description={T.t("SETTINGS_GENERAL_OVERLAY_DESC")} input={
+                                    <select value={window.settings.defaultOverlayType} onChange={(e) => this.setSetting("defaultOverlayType", e.target.value)}>
+                                        <option value="disabled">{T.t("SETTINGS_GENERAL_DIS_OVERLAY_TITLE")}</option>
+                                        <option value="safe">{T.t("SETTINGS_GENERAL_ON_OVERLAY_TITLE")}</option>
+                                        <option value="aggressive">{T.t("SETTINGS_GENERAL_FORCE_OVERLAY_TITLE")}</option>
+                                    </select>
+                                    } expandable={true}>
+                                        <SettingsChild>
+                                            <p><i>
+                                                <b>{T.t("SETTINGS_GENERAL_DIS_OVERLAY_TITLE")}:</b> {T.t("SETTINGS_GENERAL_DIS_OVERLAY_DESC")}<br />
+                                                <b>{T.t("SETTINGS_GENERAL_ON_OVERLAY_TITLE")}:</b> {T.t("SETTINGS_GENERAL_ON_OVERLAY_DESC")}<br />
+                                                <b>{T.t("SETTINGS_GENERAL_FORCE_OVERLAY_TITLE")}:</b> {T.t("SETTINGS_GENERAL_FORCE_OVERLAY_DESC")}
+                                            </i></p>
+                                        </SettingsChild>
+                                    </SettingsOption>
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_AUTOBRIGHT_TITLE")} description={T.t("SETTINGS_GENERAL_AUTOBRIGHT_DESC")} input={this.renderToggle("disableAutoApply", undefined, undefined, true)} />
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_SKIP_APPLY_TITLE")} description={T.t("SETTINGS_GENERAL_SKIP_APPLY_DESC")} expandable={true}>
+                                        {this.getSkipRestoreMonitors()}
+                                    </SettingsOption>
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_SKIP_THEME_CHANGES_TITLE")} description={T.t("SETTINGS_GENERAL_SKIP_THEME_CHANGES_DESC")} input={this.renderToggle("disableThemeChanges", undefined, undefined, true)} />
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_SKIP_POWER_EVENTS_TITLE")} description={T.t("SETTINGS_GENERAL_SKIP_POWER_EVENTS_DESC")} input={this.renderToggle("disablePowerNotifications", undefined, undefined, true)} />
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_REPORT_TITLE")} description={T.t("SETTINGS_GENERAL_REPORT_DESC")} input={<><a className="button" onClick={() => window.ipc.send('save-report')}>{T.t("SETTINGS_GENERAL_REPORT_TITLE")}</a></>} />
+
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_RESET_TITLE")} description={T.t("SETTINGS_GENERAL_RESET_DESC")} input={<a className="button" onClick={window.resetSettings}>{T.t("SETTINGS_GENERAL_RESET_BUTTON")}</a>} />
+
+                                </div>
+                            </SettingsPage>
+
+                            <SettingsPage current={this.state.activePage} id="time">
+                                <div className="pageSection">
+                                    <div className="sectionTitle">{T.t("SETTINGS_TIME_TITLE")}</div>
+                                    <p>{T.t("SETTINGS_TIME_DESC")}</p>
+                                    <div className="adjustmentTimes">
+                                        {this.getAdjustmentTimes()}
+                                    </div>
+                                    <p><a className="button" onClick={this.addAdjustmentTime}>+ {T.t("SETTINGS_TIME_ADD")}</a></p>
+                                </div>
+                                <div className="pageSection">
+                                    <SettingsOption title={T.t("SETTINGS_TIME_SUN_TITLE")} description={T.t("SETTINGS_TIME_SUN_DESC")} expandable={true}>
+                                        <SettingsChild>
+                                            <div style={{ "display": "flex" }}>
+                                                <div style={{ marginRight: "6px", flex: 1 }}>
+                                                    <label style={{ "textTransform": "capitalize" }}>{T.t("SETTINGS_TIME_LAT")}</label>
+                                                    <input type="number" min="-90" max="90" value={window.settings.adjustmentTimeLatitude * 1} onChange={(e) => this.setSetting("adjustmentTimeLatitude", e.target.value)} style={{width: "100%", boxSizing: "border-box"}} />
+                                                </div>
+                                                <div style={{flex: 1}}>
+                                                    <label style={{ "textTransform": "capitalize" }}>{T.t("SETTINGS_TIME_LONG")}</label>
+                                                    <input type="number" min="-180" max="180" value={window.settings.adjustmentTimeLongitude * 1} onChange={(e) => this.setSetting("adjustmentTimeLongitude", e.target.value)} style={{width: "100%", boxSizing: "border-box"}} />
+                                                </div>
+                                                {/* I'll write better CSS later, I promise. */}
+                                                <div><label style={{opacity:0}}>Get {T.t("SETTINGS_TIME_SUN_GET")}</label><input type="button" className="button" onClick={() => window.ipc.send("get-coordinates")} value={T.t("SETTINGS_TIME_SUN_GET")} style={{lineHeight:"1.3",padding:(document.body.dataset.isWin11 === 'true' ? "9px" : "8px"),marginLeft:"6px"}} /></div>
+                                            </div>
+                                        </SettingsChild>
+                                    </SettingsOption>
+                                    <SettingsOption title={T.t("SETTINGS_TIME_INDIVIDUAL_TITLE")} description={T.t("SETTINGS_TIME_INDIVIDUAL_DESC")} input={this.renderToggle("adjustmentTimeIndividualDisplays")} />
+                                    <SettingsOption title={T.t("SETTINGS_TIME_ANIMATE_TITLE")} description={T.t("SETTINGS_TIME_ANIMATE_DESC")} input={this.renderToggle("adjustmentTimeAnimate")} />
+                                    <SettingsOption title={T.t("SETTINGS_TIME_TRANSITON_TITLE")} description={T.t("SETTINGS_TIME_TRANSITON_DESC")} input={
+                                        <select value={window.settings.adjustmentTimeSpeed} onChange={(e) => this.setSetting("adjustmentTimeSpeed", e.target.value)}>
+                                            <option value="slowest">{T.t("GENERIC_SPEED_VERY_SLOW")}</option>
+                                            <option value="slow">{T.t("GENERIC_SPEED_SLOW")}</option>
+                                            <option value="normal">{T.t("GENERIC_SPEED_NORMAL")}</option>
+                                            <option value="faster">{T.t("GENERIC_SPEED_FAST")}</option>
+                                            <option value="fastest">{T.t("GENERIC_SPEED_VERY_FAST")}</option>
+                                            <option value="instant">{T.t("GENERIC_SPEED_INSTANT")}</option>
+                                        </select>
+                                    } />
+                                    <SettingsOption title={T.t("SETTINGS_TIME_STARTUP_TITLE")} description={T.t("SETTINGS_TIME_STARTUP_DESC")} input={this.renderToggle("checkTimeAtStartup")} />
+                                </div>
+                                <div className="pageSection">
+                                    <div className="sectionTitle">{T.t("SETTINGS_TIME_IDLE_TITLE")}</div>
+                                    <SettingsOption title={T.t("SETTINGS_TIME_IDLE_TITLE")} description={T.t("SETTINGS_TIME_IDLE_DESC")} input={this.renderToggle("detectIdleTimeEnabled")}>
+                                        <SettingsChild content={
+                                                <div style={{ "display": "flex" }}>
+                                                    <div style={{ "marginRight": "6px" }}>
+                                                        <label style={{ "textTransform": "capitalize" }}>{T.t("GENERIC_MINUTES")}</label>
+                                                        <input type="number" min="0" max="600" value={window.settings.detectIdleTimeMinutes * 1} onChange={(e) => this.setSetting("detectIdleTimeMinutes", e.target.value)} />
+                                                    </div>
+                                                    <div>
+                                                        <label style={{ "textTransform": "capitalize" }}>{T.t("GENERIC_SECONDS")}</label>
+                                                        <input type="number" min="0" max="600" value={window.settings.detectIdleTimeSeconds * 1} onChange={(e) => this.setSetting("detectIdleTimeSeconds", e.target.value)} />
+                                                    </div>
+                                                </div>
+                                            } />
+                                    </SettingsOption>
+                                    <SettingsOption title={T.t("SETTINGS_TIME_IDLE_FS_TITLE")} description={T.t("SETTINGS_TIME_IDLE_FS_DESC")} input={this.renderToggle("detectIdleCheckFullscreen")} />
+                                    <SettingsOption title={T.t("SETTINGS_TIME_IDLE_MEDIA_TITLE")} description={T.t("SETTINGS_TIME_IDLE_MEDIA_DESC")} input={this.renderToggle("detectIdleMedia")} />
+                                </div>
+                            </SettingsPage>
+
+
+                            <SettingsPage current={this.state.activePage} id="monitors">
+
+                                <div className="pageSection">
+                                    <div className="sectionTitle">{T.t("GENERIC_ALL_DISPLAYS")}</div>
+                                    <div className="monitorItem-list">
+                                        {this.getInfoMonitors()}
+                                    </div>
+                                </div>
+
+                                <div className="pageSection">
+                                    <SettingsOption title={T.t("SETTINGS_MONITORS_RATE_TITLE")} description={T.t("SETTINGS_MONITORS_RATE_DESC")} input={(
+                                        <select value={this.state.updateInterval} onChange={this.updateIntervalChanged}>
+                                            <option value="100">{T.t("SETTINGS_MONITORS_RATE_0")}</option>
+                                            <option value="250">{T.t("SETTINGS_MONITORS_RATE_1")}</option>
+                                            <option value="500">{T.t("SETTINGS_MONITORS_RATE_2")}</option>
+                                            <option value="1000">{T.t("SETTINGS_MONITORS_RATE_3")}</option>
+                                            <option value="2000">{T.t("SETTINGS_MONITORS_RATE_4")}</option>
+                                        </select>
+                                    )} />
+                                    <SettingsOption title={T.t("SETTINGS_MONITORS_HIDE_DISPLAYS_TITLE")} description={T.t("SETTINGS_MONITORS_HIDE_DISPLAYS_DESC")} expandable={true}>
+                                        {this.getHideMonitors()}
+                                    </SettingsOption>
+                                    <SettingsOption title={T.t("SETTINGS_MONITORS_HIDE_INTERNAL_TITLE")} description={T.t("SETTINGS_MONITORS_HIDE_INTERNAL_DESC")} input={this.renderToggle("hideClosedLid")} />
+                                    <SettingsOption title={T.t("SETTINGS_MONITORS_RENAME_TITLE")} description={T.t("SETTINGS_MONITORS_RENAME_DESC")} expandable={true}>
+                                        {this.getRenameMonitors()}
+                                    </SettingsOption>
+                                    <SettingsOption title={T.t("SETTINGS_MONITORS_REORDER_TITLE")} description={T.t("SETTINGS_MONITORS_REORDER_DESC")} expandable={true}>
+                                        <SettingsChild content={
+                                            <div className="reorderList">
+                                                {this.getReorderMonitors()}
+                                            </div>
+                                        } />
+                                    </SettingsOption>
+                                    <SettingsOption title={T.t("SETTINGS_MONITORS_GAMMA_SLIDER_TITLE")} description={T.t("SETTINGS_MONITORS_GAMMA_SLIDER_DESCRIPTION")} expandable={true}>
+                                        {this.getGammaMonitorsSettings()}
+                                    </SettingsOption>
+                                    <SettingsOption title={T.t("SETTINGS_MONITORS_EXTEND_MINIMUM_TITLE")} description={T.t("SETTINGS_MONITORS_EXTEND_MINIMUM_DESCRIPTION")} expandable={true}>
+                                        {this.getExtendMinimumMonitorsSettings()}
+                                    </SettingsOption>
+                                    <SettingsOption title={T.t("SETTINGS_MONITORS_SDR_SLIDER_TITLE")} description={T.t("SETTINGS_MONITORS_SDR_SLIDER_DESCRIPTION")} expandable={true}>
+                                        {this.getSDRMonitorsSettings()}
+                                    </SettingsOption>
+                                </div>
+
+                                <div className="pageSection">
+                                    <div className="sectionTitle">{T.t("SETTINGS_MONITORS_NORMALIZE_TITLE")}</div>
+                                    <p>{T.t("SETTINGS_MONITORS_NORMALIZE_DESC")}</p>
+                                    <p>{T.t("SETTINGS_MONITORS_CALIBRATION_DESC")}</p>
+                                    {this.getMinMaxMonitors()}
+                                </div>
+
+                            </SettingsPage>
+
+
+
+                            <SettingsPage current={this.state.activePage} id="features">
+                                <div className="pageSection">
+                                    <div className="sectionTitle">{T.t("SETTINGS_SIDEBAR_FEATURES")}</div>
+                                    <p>{T.t("SETTINGS_FEATURES_DESCRIPTION")}</p>
+                                    {this.getFeaturesMonitors()}
+                                </div>
+                                <div className="pageSection">
+                                    <SettingsOption title={T.t("SETTINGS_FEATURES_CUR_BRIGHTNESS_TITLE")} description={T.t("SETTINGS_FEATURES_CUR_BRIGHTNESS_DESC")} input={this.renderToggle("getDDCBrightnessUpdates")} />
+                                    <SettingsOption title={T.t("SETTINGS_FEATURES_POWER_TITLE")} description={T.t("SETTINGS_FEATURES_POWER_DESC")} input={
+                                        <select value={this.state.rawSettings.ddcPowerOffValue} onChange={e => {
+                                            this.setState({ ddcPowerOffValue: parseInt(e.target.value) })
+                                            window.sendSettings({ ddcPowerOffValue: parseInt(e.target.value) })
+                                        }}>
+                                            <option value={4}>{T.t("SETTINGS_FEATURES_POWER_STANDBY")} (4) ⚠️</option>
+                                            <option value={5}>{T.t("SETTINGS_FEATURES_POWER_OFF")} (5)</option>
+                                            <option value={6}>{T.t("SETTINGS_FEATURES_POWER_COMPAT")} (4 &amp; 5)</option>
+                                        </select>
+                                    }>
+                                        <SettingsChild description={<>⚠️ <em>{T.t("SETTINGS_FEATURES_POWER_WARNING")}</em></>} />
+                                    </SettingsOption>                                
+                                </div>
+                            </SettingsPage>
+
+                            <SettingsPage current={this.state.activePage} id="hotkeys">
+                                <div className="pageSection">
+                                    <div className="sectionTitle">{T.t("SETTINGS_HOTKEYS_TITLE")}</div>
+                                    <p>{T.t("SETTINGS_HOTKEYS_DESC")}</p>
+                                    {hasNativeBrightnessHotkey ? (
+                                        <>
+                                            <p>⚠️ <em>{T.t("SETTINGS_HOTKEYS_NATIVE_BRIGHTNESS_WARN")}</em></p>
+                                            <p><em>{T.t("SETTINGS_HOTKEYS_NATIVE_BRIGHTNESS_CHECK")}</em></p>
+                                        </>
+                                    ) : null}
+                                    <div className="hotkey-monitors">
+                                        {this.getHotkeyList()}
+                                        <p><a className="button" onClick={() => {
+                                            this.state.hotkeys.push({
+                                                accelerator: "",
+                                                actions: [
+                                                    Object.assign({}, defaultAction)
+                                                ],
+                                                id: uuid()
+                                            })
+                                            window.sendSettings({ hotkeys: this.state.hotkeys.slice() })
+                                            this.forceUpdate()
+                                        }}>+ {T.t("SETTINGS_HOTKEYS_ADD")}</a></p>
+                                    </div>
+
+                                </div>
+
+                                <div className="pageSection">
+                                    <SettingsOption title={T.t("SETTINGS_HOTKEYS_BREAK_TITLE")} description={T.t("SETTINGS_HOTKEYS_BREAK_DESC")} input={this.renderToggle("hotkeysBreakLinkedLevels")} />
+                                </div>
+
+                                <div className="pageSection">
+                                    <div className="sectionTitle">{T.t("SETTINGS_GENERAL_SCROLL_TITLE")}</div>
+                                    <SettingsOption title={T.t("SETTINGS_GENERAL_SCROLL_TITLE")} description={T.t("SETTINGS_GENERAL_SCROLL_DESC")} input={this.renderToggle("scrollShortcut")}>
+                                        <SettingsChild title={T.t("SETTINGS_HOTKEYS_SCROLL_AMOUNT")} className="win10-stack-input" input={
+                                            <input type="number" min={1} max={100} step={1}
+                                            value={this.state.rawSettings.scrollShortcutAmount} onChange={e => {
+                                                this.state.rawSettings.scrollShortcutAmount = parseInt(e.target.value)
+                                                window.sendSettings({ scrollShortcutAmount: parseInt(e.target.value) })
+                                                this.forceUpdate()
+                                            }} />
+                                        } />
+                                        <SettingsChild title={T.t("SETTINGS_HOTKEYS_INVERT_SCROLL_TITLE")} description={T.t("SETTINGS_HOTKEYS_INVERT_SCROLL_DESC")} input={this.renderToggle("invertScroll")} />
+                                    </SettingsOption>
+                                </div>
+
+                                <div className="pageSection">
+                                    <div className="sectionTitle">{T.t("SETTINGS_HOTKEYS_TOD_TITLE")}</div>
+                                    <SettingsOption title={T.t("SETTINGS_HOTKEYS_TOD_TITLE")} description={T.t("SETTINGS_HOTKEYS_TOD_DESC")} input={
+                                        <select value={this.state.rawSettings.sleepAction} onChange={this.sleepActionChanged}>
+                                            <option value="none">{T.t("SETTINGS_HOTKEYS_TOD_NONE")}</option>
+                                            <option value="ps">{T.t("SETTINGS_HOTKEYS_TOD_SOFT")}</option>
+                                            <option value="ddcci">{T.t("SETTINGS_HOTKEYS_TOD_HARD")}</option>
+                                            <option value="ps_ddcci">{T.t("SETTINGS_HOTKEYS_TOD_BOTH")}</option>
+                                        </select>
+                                    }>
+                                        <SettingsChild description={
+                                            <div>
+                                                <i>{T.t("SETTINGS_HOTKEYS_TOD_NOTE")}</i>
+                                                { (this.state.rawSettings?.sleepAction === "ddcci" || this.state.rawSettings?.sleepAction === "ps_ddcci" ? (<div className="ddc-warning"><br />⚠️ <em>{T.t("GENERIC_DDC_WARNING")}</em></div>) : null) }
+                                            </div>
+                                        } />
+                                    </SettingsOption>
+                                    <p></p>
+
+                                    
+                                </div>
+
+                                <div className="pageSection">
+                                    <div className="sectionTitle">{T.t("SETTINGS_PROFILES_TITLE")}</div>
+                                    <p>{T.t("SETTINGS_PROFILES_DESC")}</p>
+                                    <div className="hotkey-profiles">
+                                        {this.state.rawSettings?.profiles?.map((profile, idx) => <AppProfile key={`${idx}__${profile.uuid}`} profile={profile} monitors={this.state.monitors} updateValue={(key, value) => {
+                                            profile[key] = value
+                                            sendSettings({ profiles: this.state.rawSettings?.profiles })
+                                            this.forceUpdate()
+                                        }}
+                                            onDelete={
+                                                () => {
+                                                    this.state.rawSettings?.profiles.splice(idx, 1)
+                                                    sendSettingsImmediate({ profiles: this.state.rawSettings?.profiles })
+                                                    this.forceUpdate()
+                                                }
+                                            } />)}
+                                        <p><a className="add-new button" onClick={() => addNewProfile(this.state)}>+ {T.t("SETTINGS_PROFILES_ADD")}</a></p>
+                                    </div>
+
+                                </div>
+                            </SettingsPage>
+
+                            <SettingsPage current={this.state.activePage} id="light-sensor">
+                                <LightSensorSettings T={T} renderToggle={this.renderToggle.bind(this)} monitors={this.state.monitors}></LightSensorSettings>
+                            </SettingsPage>
+
+                            <SettingsPage current={this.state.activePage} id="updates">
+                                <div className="pageSection">
+                                    <div className="sectionTitle">{T.t("SETTINGS_UPDATES_TITLE")}</div>
+                                    <p>{T.h("SETTINGS_UPDATES_VERSION", '<b>' + (window.version ? `${window.version}${window.versionTag && window.versionBuild ? ` (${window.versionBuild})` : ""}` : "not available") + '</b>')}</p>
+                                    {this.getUpdate()}
+                                </div>
+                                <div className="pageSection" style={{ display: (window.isAppX ? "none" : (this.isSection("updates") ? "block" : "none")) }}>
+                                    <SettingsOption title={T.t("SETTINGS_UPDATES_AUTOMATIC_TITLE")} description={T.t("SETTINGS_UPDATES_AUTOMATIC_DESC")} input={this.renderToggle("checkForUpdates")} />
+                                    <SettingsOption title={T.t("SETTINGS_UPDATES_CHANNEL")} input={
+                                        <select value={this.state.rawSettings.branch} onChange={(e) => { window.sendSettings({ branch: e.target.value }) }}>
+                                            <option value="master">{T.t("SETTINGS_UPDATES_BRANCH_STABLE")}</option>
+                                            <option value="beta">{T.t("SETTINGS_UPDATES_BRANCH_BETA")}</option>
+                                        </select>
+                                    } />
+                                </div>
+                            </SettingsPage>
+
+                            <SettingsPage current={this.state.activePage} id="debug">
+    
+
+                                <div className="pageSection debug">
+                                    <SettingsOption title="All Displays" expandable={true} forceExpandable={true} input={<><a className="button" onClick={() => { window.requestMonitors(true) }}>Refresh Monitors</a> <a className="button" onClick={() => window.ipc.send('flush-vcp-cache')}>Clear Cache</a></>}>
+                                        <SettingsChild description={this.getDebugMonitors()} />
+                                    </SettingsOption>
+                                    
+                                    <SettingsOption title="Save Report" description={"Save a text file with information about your monitors and settings for debugging."} input={<><a className="button" onClick={() => window.ipc.send('save-report')}>Generate Report</a></>} />
+
+                                    <SettingsOption title="Settings" description={window.settingsPath} input={<a className="button" onClick={() => window.ipc.send('open-settings-file')}>Open Settings</a>} expandable={true} forceExpandable={true}>
+                                        <SettingsChild>
+                                            <p style={{ whiteSpace: "pre-wrap", fontFamily: '"Cascadia Code", "Consolas", sans-serif' }}>{JSON.stringify(this.state.rawSettings, undefined, 2)}</p>
+                                        </SettingsChild>
+                                    </SettingsOption>     
+                                    
+                                    <SettingsOption title="Raw Monitor Data" expandable={true} forceExpandable={true}>
+                                        <SettingsChild>
+                                            <pre style={{ whiteSpace: "pre-wrap" }}>{JSON.stringify(window.allMonitors, undefined, 2)}</pre>
+                                        </SettingsChild>
+                                    </SettingsOption>                               
+                                </div>
+
+                                <div className="pageSection debug">
+                                    <div className="sectionTitle">Other</div>
+    
+                                    <SettingsOption title="Dev Mode" input={this.renderToggle("isDev")} />
+                                    <SettingsOption title="UDP Server" expandable={true}>
+                                        <SettingsChild title="Enable UDP server" input={this.renderToggle("udpEnabled")} />
+                                        <SettingsChild title="Enable UDP commands outside of localhost" input={this.renderToggle("udpRemote")} />
+                                        <SettingsChild title="Default port for UDP commands" input={<input type="number" min="1" max="65535" value={window.settings.udpPortStart * 1} onChange={(e) => this.setSetting("udpPortStart", e.target.value)} />} />
+                                        <SettingsChild title={`Active port: ${window.settings.udpPortActive}`} />
+                                        <SettingsChild title={`UDP key: ${window.settings.udpKey}`} />
+                                    </SettingsOption>
+                                    
+                                    <SettingsOption title="DDC/CI Scanning Mode" description={`Last test result: ${settings?.lastDetectedDDCCIMethod}`} input={
+                                        <select value={this.state.rawSettings.preferredDDCCIMethod} onChange={e => {
+                                            window.sendSettings({ preferredDDCCIMethod: e.target.value })
+                                        }}>
+                                            <option value="auto">Auto</option>
+                                            <option value="fast">Fast</option>
+                                            <option value="accurate">Accurate</option>
+                                            <option value="no-validation">No validation</option>
+                                            <option value="legacy">Legacy (v1.15.4 behavior)</option>
+                                        </select>
+                                    } />
+
+                                    {this.state.ddcSafetyStatus ? <SettingsOption title="DDC/CI safety mode is active" description={`A monitor worker stopped during ${this.state.ddcSafetyStatus.stage || "DDC/CI detection"}${this.state.ddcSafetyStatus.monitor ? ` for ${this.state.ddcSafetyStatus.monitor}` : ""}. Automatic detection is using the safer Fast method.`} input={<a className="button button-primary" onClick={() => window.retryDDCValidation()}>Retry Accurate Validation</a>} /> : null}
+
+                                    <SettingsOption title="Gamma ramp fallback" description="Adjust brightness with the display's gamma ramp when no hardware brightness control (DDC/CI, WMI) is available. This dims the image instead of the backlight." input={this.renderToggle("useSoftwareBrightnessFallback")} />
+
+                                    <SettingsOption title={T.t("SETTINGS_MONITORS_HDR_DISPLAYS_TITLE")} description={T.t("SETTINGS_MONITORS_HDR_DISPLAYS_DESC")} expandable={true}>
+                                        {this.getHDRMonitors()}
+                                    </SettingsOption>
+
+                                    <SettingsOption title="Idle restore time" description="How long (in seconds) after going idle to rescan displays and apply last known brightness." input={<input type="number" min="0" max="60" value={this.state.rawSettings.idleRestoreSeconds * 1} onChange={(e) => this.setSetting("idleRestoreSeconds", e.target.value)} /> } />
+
+                                    <SettingsOption title="Wake restore time" description="How long (in seconds) after waking from sleep to rescan displays and apply last known brightness." input={<input type="number" min="0" max="60" value={this.state.rawSettings.wakeRestoreSeconds * 1} onChange={(e) => this.setSetting("wakeRestoreSeconds", e.target.value)} /> } />
+
+                                    <SettingsOption title="Hardware change time" description="How long (in seconds) after detecting a hardware change to rescan displays and apply last known brightness." input={<input type="number" min="0" max="60" value={this.state.rawSettings.hardwareRestoreSeconds * 1} onChange={(e) => this.setSetting("hardwareRestoreSeconds", e.target.value)} /> } />
+
+                                    <SettingsOption title="VCP read delay" description="How long (in miliseconds) to delay returning a VCP code value. This can help some displays not return random errors." input={<input type="number" min="0" max="200" value={this.state.rawSettings.checkVCPWaitMS * 1} onChange={(e) => this.setSetting("checkVCPWaitMS", e.target.value)} /> } />
+
+                                    <SettingsOption title="Flyout scroll amount" description="How large of steps to take when scrolling over a slider." input={<input type="number" min="1" max="10" value={this.state.rawSettings.scrollFlyoutAmount * 1} onChange={(e) => this.setSetting("scrollFlyoutAmount", e.target.value)} /> } />
+                                    
+                                    <SettingsOption title="Disable theme update detection" description="Prevent the app from detecting theme/wallpaper changes from Windows. This may help if a 3rd party app is frequently changing the theme, increasing CPU usage." input={this.renderToggle("disableThemeChanges")} />
+                                    <SettingsOption title="Restart app on wake" input={this.renderToggle("restartOnWake")} />
+                                    <SettingsOption title="Disable Auto Refresh" description="Prevent last known brightness from read after certain hardware/user events." input={this.renderToggle("disableAutoRefresh")} />
+                                    <SettingsOption title="Use Win32 hardware events" input={this.renderToggle("useWin32Event")} />
+                                    <SettingsOption title="Use Electron hardware events" input={this.renderToggle("useElectronEvents")} />
+                                    <SettingsOption title="Use WM_DISPLAYCHANGE events" input={this.renderToggle("useWmDisplayChangeEvent")} />
+                                    <SettingsOption title="Use SC_MONITORPOWER events" input={this.renderToggle("useScMonitorPowerEvent")} />
+                                    <SettingsOption title="Use GUID_SESSION_USER_PRESENCE events" input={this.renderToggle("useGuidPresenceEvent")} />
+                                    <SettingsOption title="Use GUID_VIDEO_CURRENT_MONITOR_BRIGHTNESS events" input={this.renderToggle("useGuidBrightnessEvent")} />
+                                    <SettingsOption title="Reload tray icon on hardware events" input={this.renderToggle("reloadTray")} />
+                                    <SettingsOption title="Reload flyout panel on hardware events" input={this.renderToggle("reloadFlyout")} />
+                                    <SettingsOption title="Save logs to file" description="Write a log file each session for troubleshooting. The last few sessions are kept in the app's data folder." input={this.renderToggle("logging")} />
+                                    <SettingsOption title="Show console window (requires restart)" input={this.renderToggle("showConsole")} />
+                                    <SettingsOption title="Use Taskbar Registry" input={this.renderToggle("useTaskbarRegistry")} />
+                                    <SettingsOption title="Disable Mouse Events (requires restart)" input={this.renderToggle("disableMouseEvents")} />
+
+                                </div>
+                            </SettingsPage>
+
+
+
+
+                        </div>
+                    </div>
+
+                    <div className="add-feature-overlay" data-show={this.state.showAddFeatureOverlay}>
+                        <div className="inner">
+                            <div className="input-row">
+                                <div className="field">
+                                    <p>{T.t("SETTINGS_FEATURES_ADD_DESC")}</p>
+                                    <label>{T.t("SETTINGS_FEATURES_ADD_VCP")}</label>
+                                    <input type="text" placeholder={T.t("SETTINGS_FEATURES_ADD_PLACEHOLDER")} ref={this.addFeatureInputRef} value={this.state.addFeatureValue} onChange={e => this.setState({ addFeatureValue: e.target.value })} onKeyUp={e => {
+                                        if (e.which === 13 && this.state.addFeatureValue) {
+                                            // Enter
+                                            this.addFeatureOKRef.current.click()
+                                        } else if (e.which === 27) {
+                                            // Escape
+                                            this.addFeatureCancelRef.current.click()
+                                        }
+                                    }} />
+                                </div>
+                            </div>
+                            <div className="input-row" style={{ display: (this.state.addFeatureError ? "block" : "none") }}>
+                                <p><b>{T.t("SETTINGS_FEATURES_ADD_EXISTS")}</b></p>
+                            </div>
+                            <div className="input-row flex-end">
+                                <input type="button" ref={this.addFeatureCancelRef} value={"Cancel"} className="button" onClick={() => this.setState({ showAddFeatureOverlay: false })} />
+                                <input type="button" ref={this.addFeatureOKRef} value={"OK"} className="button" onClick={() => {
+                                    let isActive = false
+                                    const vcp = vcpStr(this.state.addFeatureValue)
+                                    try {
+                                        isActive = this.state.rawSettings.monitorFeatures[this.state.addFeatureMonitor][vcp];
+                                    } catch (e) { }
+                                    if (isActive) {
+                                        this.setState({ addFeatureError: true })
+                                    } else {
+                                        this.setState({ showAddFeatureOverlay: false })
+                                        this.toggleFeature(this.state.addFeatureMonitor, vcp)
+                                    }
+
+                                }} />
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </SafeRender>
+        );
+    }
+}
+
+function addNewProfile(state) {
+    if (!state.rawSettings?.profiles) return false;
+    const id = uuid()
+    const profile = {
+        id,
+        uuid: uuid(),
+        name: "",
+        overlayType: "normal",
+        setBrightness: false,
+        monitors: {},
+        showInMenu: false
+    }
+    state.rawSettings.profiles.push(profile)
+    sendSettings({ profiles: state.rawSettings.profiles })
+}
+
+function getProfileMonitors(monitors, profile, onChange) {
+    return Object.values(monitors).map((monitor, idx) => {
+        if (!isAdjustableDisplay(monitor)) {
+            return (null)
+        } else {
+            let level = (profile.monitors?.[monitor.id] ?? 50)
+            return (<Slider key={monitor.id + ".brightness"} min={0} max={100} name={monitor.name} height="short" onChange={level => {
+                profile.monitors[monitor.id] = level
+                onChange(profile, monitor.id, level)
+            }} level={level} scrolling={false} />)
+        }
+    })
+}
+
+function AppProfile(props) {
+    const { profile, updateValue, onDelete, monitors } = props
+    if (!profile.monitors) profile.monitors = {};
+
+    return (
+        <SettingsOption title={<input type="text" placeholder={T.t("SETTINGS_PROFILES_NAME")} value={profile.name} onChange={e => updateValue("name", e.target.value)} style={{width:"100%"}}></input>} expandable={true} input={<a className="add-new button button-primary block" onClick={onDelete}>{ deleteIcon } <span>{T.t("GENERIC_DELETE")}</span></a>} className="appProfileItem win10-has-background" key={profile.id}>
+            <SettingsChild content={
+                <>
+                    <div className="feature-toggle-row">
+                        <input onChange={(e) => { updateValue("setBrightness", e.target.checked) }} checked={profile.setBrightness} data-checked={profile.setBrightness} type="checkbox" />
+                        <div className="feature-toggle-label"><span>{T.t("SETTINGS_PROFILES_BRIGHTNESS_TOGGLE")}</span></div>
+                    </div>
+
+                    <div className="profile-monitors">
+                        {(profile.setBrightness ? getProfileMonitors(monitors, profile, profile => updateValue("monitors", profile.monitors)) : null)}
+                    </div>
+
+                    {(profile.setBrightness ? (
+                        <div className="feature-toggle-row">
+                            <input onChange={(e) => { updateValue("showInMenu", e.target.checked) }} checked={profile.showInMenu} data-checked={profile.showInMenu} type="checkbox" />
+                            <div className="feature-toggle-label"><span>{T.t("SETTINGS_PROFILES_SHOW_MENU")}</span></div>
+                        </div>
+                    ) : null)}
+                </>
+            } />
+            <SettingsChild content={
+                <>
+                    <div className="option-title">{T.t("SETTINGS_PROFILES_TRIGGER_TITLE")} ({T.t("GENERIC_OPTIONAL")})</div>
+                    <br />
+
+                    <label>{T.t("SETTINGS_PROFILES_APP_PATH")}</label>
+                    <p>{T.t("SETTINGS_PROFILES_APP_DESC")}</p>
+                    <input type="text" placeholder={T.t("SETTINGS_PROFILES_APP_PATH")} value={profile.path} onChange={e => updateValue("path", e.target.value)} style={{width:"100%"}}></input>
+                    <label>{T.t("SETTINGS_PROFILES_OVERLAY_TITLE")}</label>
+                    <p>{T.t("SETTINGS_PROFILES_OVERLAY_DESC")}</p>
+                    <select value={profile.overlayType} onChange={e => updateValue("overlayType", e.target.value)}>
+                        <option value="normal">{T.t("GENERIC_DEFAULT")}</option>
+                        <option value="safe">{T.t("SETTINGS_GENERAL_DIS_OVERLAY_TITLE")}</option>
+                        <option value="disabled">{T.t("SETTINGS_GENERAL_ON_OVERLAY_TITLE")}</option>
+                        <option value="aggressive">{T.t("SETTINGS_GENERAL_FORCE_OVERLAY_TITLE")}</option>
+                    </select>
+                </>
+            } />
+        </SettingsOption>
+    )
+}
+
+function SettingsPage(props) {
+    if (props.current === props.id) {
+        return (
+            <SafeRender><div className="settings-page">{props.children}</div></SafeRender>
+        )
+    }
+    return null
+}
+
+function ActionItem(props) {
+    const { action, monitors, monitorNames } = props
+    const showDisplaysList = (action.type != "off" && action.type != "refresh")
+
+    const getHotkeyMonitors = () => {
+        try {
+            if(action.allMonitors) return (null)
+            if (monitors == undefined || Object.keys(monitors).length == 0) {
+                return (<div className="no-displays-message option-description" style={{lineHeight:1.35}}>{T.t("GENERIC_NO_COMPATIBLE_DISPLAYS")}</div>)
+            } else {
+                return Object.values(monitors).map((monitor, index) => {
+                    if(!isAdjustableDisplay(monitor)) return null;
+                    return (
+                        <div key={monitor.key} className="feature-toggle-row">
+                            <input onChange={e => {
+                                if (!action.monitors) action.monitors = {};
+                                action.monitors[monitor.id] = e.target.checked
+                                props.onChange?.(action)
+                            }} checked={(action.monitors?.[monitor.id] ? true : false)} data-checked={(action.monitors?.[monitor.id] ? true : false)} type="checkbox" />
+                            <div className="feature-toggle-label" style={{ display: "flex", alignItems: "center", gap: "8px" }}>{getMonitorName(monitor, monitorNames)}</div>
+                        </div>
+                    )
+
+                })
+            }
+        } catch (e) {
+            console.log(e)
+        }
+    }
+
+    const getHotkeyInput = () => {
+        if (action.type === "off") {
+            return (<div className="input-row"><p style={{lineHeight: 1.2}}>{T.t("SETTINGS_HOTKEY_OFF_WARN")}</p></div>)
+        } else if (action.type === "refresh") {
+            return null
+        } else {
+            let selectBoxValue = action.target
+            if (!(selectBoxValue === "brightness" || selectBoxValue === "sdr" || selectBoxValue === "contrast" || selectBoxValue === "volume" || selectBoxValue === "powerState")) {
+                selectBoxValue = "vcp"
+            }
+            const selectBox = (
+                <div className="field">
+                    <label>{T.t("SETTINGS_HOTKEY_TARGET")}</label>
+                    <select value={selectBoxValue} onChange={e => {
+                        const value = e.target.value
+                        if (value === "vcp") {
+                            action.target = ""
+                        } else {
+                            action.target = value
+                        }
+                        props.onChange?.(action)
+                    }}>
+                        <option value="brightness">{T.t("PANEL_LABEL_BRIGHTNESS")}</option>
+                        <option value="contrast">{T.t("PANEL_LABEL_CONTRAST")}</option>
+                        <option value="volume">{T.t("PANEL_LABEL_VOLUME")}</option>
+                        <option value="vcp">{T.t("SETTINGS_FEATURES_ADD_VCP")}</option>
+                        <option value="sdr">{T.t("SETTINGS_FEATURES_SDR_BRIGHTNESS")}</option>
+                    </select>
+                </div>
+            )
+
+            const singleValue = () => (
+                <div className="input-row hotkey-action-value">
+                    <div className="hotkey-value field">
+                        <label>{T.t("SETTINGS_HOTKEY_VALUE")}</label>
+                        <input type="number" min="-65535" max="65535" value={action.value ?? 0} placeholder={T.t("SETTINGS_HOTKEY_VALUE_PLACEHOLDER")} onChange={e => {
+                            const value = e.target.value
+                            action.value = value ?? 0
+                            props.onChange?.(action)
+                        }} />
+                    </div>
+                </div>
+            )
+
+            const listOfValues = () => (
+                <div className="input-row hotkey-action-values">
+                    <div className="hotkey-values-list">
+                        <label>{T.t("SETTINGS_HOTKEY_VALUES")}</label>
+                        {action.values?.map((value, idx2) => {
+                            return (
+                                <div className="hotkey-value" key={idx2}>
+                                    <input type="number" min="-65535" max="65535" value={value ?? 0} placeholder={T.t("SETTINGS_HOTKEY_VALUE_PLACEHOLDER")}
+                                        onChange={e => {
+                                            const value = e.target.value
+                                            action.values[idx2] = value ?? 0
+                                            props.onChange?.(action)
+                                        }} />
+                                    {idx2 ? (
+                                        <input type="button" className="button" onClick={() => {
+                                            action.values.splice(idx2, 1)
+                                            props.onChange?.(action)
+                                        }} value={T.t("GENERIC_DELETE")} />
+                                    ) : null}
+                                </div>
+                            )
+                        })}
+                        <p><a className="button button-primary" onClick={() => {
+                            action.values.push([0])
+                            props.onChange?.(action)
+                        }}>+ {T.t("SETTINGS_HOTKEY_ADD_VALUE")}</a></p>
+                    </div>
+                </div>
+            )
+
+            return (
+                <>
+                    <div className="input-row hotkey-action-type">
+                        {selectBox}
+                    </div>
+                    <div className="input-row hotkey-action-code" style={{ display: (selectBoxValue === "vcp" ? "block" : "none") }}>
+                        <div className="field">
+                            <label>{T.t("SETTINGS_FEATURES_ADD_VCP")}</label>
+                            <input value={action.target} type="text" placeholder={T.t("SETTINGS_FEATURES_ADD_PLACEHOLDER")} onChange={e => {
+                                action.target = e.target.value
+                                props.onChange?.(action)
+                            }} />
+                        </div>
+                    </div>
+                    {action.type === "cycle" ? listOfValues() : singleValue()}
+                </>
+            )
+        }
+    }
+
+    return (
+        <div className="action-item-base">
+            { props.onDelete ?
+                <div className=""><a className="button button-primary" onClick={() => props.onDelete?.(action)}>{deleteIcon} <span>{props.title ?? T.t("SETTINGS_HOTKEY_ACTION")}</span></a><br /><br /></div>
+            : <div className="option-title">{props.title ?? T.t("SETTINGS_HOTKEY_ACTION")}</div> }
+            
+            <div className="input-row">
+                <div className="hotkey-monitors-list" style={{ display: (showDisplaysList ? "block" : "none") }}>
+                    <div className="input-row">
+                        <div className="field">
+                            <div className="feature-toggle-row">
+                                <input onChange={e => {
+                                    action.allMonitors = e.target.checked
+                                    props.onChange?.(action)
+                                }} checked={action.allMonitors} data-checked={action.allMonitors} type="checkbox" />
+                                <div className="feature-toggle-label">{T.t("GENERIC_ALL_DISPLAYS")}</div>
+                            </div>
+                            {getHotkeyMonitors()}
+                        </div>
+                    </div>
+                </div>
+                <div className="hotkey-action-fields">
+                    <div className="input-row">
+                        <div className="field">
+                            <label>{T.t("SETTINGS_HOTKEY_ACTION")}</label>
+                            <select value={action.type} onChange={e => {
+                                action.type = e.target.value
+                                props.onChange?.(action)
+                            }}>
+                                <option value="set">{T.t("SETTINGS_HOTKEY_ACTION_SET")}</option>
+                                <option value="offset">{T.t("SETTINGS_HOTKEY_ACTION_OFFSET")}</option>
+                                <option value="cycle">{T.t("SETTINGS_HOTKEY_ACTION_CYCLE")}</option>
+                                <option value="off">{T.t("PANEL_BUTTON_TURN_OFF_DISPLAYS")}</option>
+                                <option value="refresh">{T.t("GENERIC_REFRESH_DISPLAYS")}</option>
+                            </select>
+                        </div>
+                    </div>
+                    {getHotkeyInput()}
+                </div>
+            </div>
+        </div>
+    )
+}
