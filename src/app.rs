@@ -2,7 +2,9 @@
 //! live settings and the actions every surface (popup, Settings, tray)
 //! performs on them.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui::Context;
 
@@ -28,6 +30,9 @@ pub struct AppModel {
     pub import_offer: Option<PendingImport>,
     /// Accepted import whose name-keyed entries resolve on the next snapshot.
     import_pending: Option<PendingImport>,
+    /// When the user last set each display, so hardware echoes of earlier
+    /// throttled writes cannot drag the slider back mid-drag.
+    local_edits: HashMap<String, Instant>,
     service: Arc<MonitorService>,
     persist: PersistFn,
 }
@@ -51,6 +56,7 @@ impl AppModel {
             loaded: false,
             import_offer: None,
             import_pending: None,
+            local_edits: HashMap::new(),
             service,
             persist,
         }
@@ -84,12 +90,19 @@ impl AppModel {
             }
             Event::Updated(monitor) => {
                 if let Some(slot) = self.monitors.iter_mut().find(|m| m.id == monitor.id) {
-                    // A write we already reflected optimistically must not
-                    // snap the slider back while the user is dragging.
-                    let keep = slot.brightness;
+                    // Levels the user set moments ago win over echoes of
+                    // older writes still draining through the throttle.
+                    let recent = self
+                        .local_edits
+                        .get(&monitor.id)
+                        .is_some_and(|at| at.elapsed() < LOCAL_EDIT_HOLD);
+                    let (brightness, sdr) = (slot.brightness, slot.sdr);
                     *slot = monitor;
-                    if slot.brightness.is_none() {
-                        slot.brightness = keep;
+                    if recent || slot.brightness.is_none() {
+                        slot.brightness = brightness.or(slot.brightness);
+                    }
+                    if recent && slot.sdr.is_some() {
+                        slot.sdr = sdr.or(slot.sdr);
                     }
                 } else {
                     self.monitors.push(monitor);
@@ -189,6 +202,7 @@ impl AppModel {
         if let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) {
             monitor.brightness = Some(hardware);
         }
+        self.local_edits.insert(id.to_owned(), Instant::now());
         self.service.send(Command::SetBrightness {
             id: id.to_owned(),
             percent: hardware,
@@ -212,6 +226,7 @@ impl AppModel {
             if let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) {
                 monitor.brightness = Some(hardware);
             }
+            self.local_edits.insert(id.clone(), Instant::now());
             self.service.send(Command::SetBrightness {
                 id,
                 percent: hardware,
@@ -236,6 +251,7 @@ impl AppModel {
         {
             sdr.percent = percent;
         }
+        self.local_edits.insert(id.to_owned(), Instant::now());
         self.service.send(Command::SetSdr {
             id: id.to_owned(),
             percent,
@@ -396,6 +412,9 @@ impl AppModel {
         (self.persist)(&self.settings);
     }
 }
+
+/// How long a local edit outranks hardware reports for the same display.
+const LOCAL_EDIT_HOLD: Duration = Duration::from_millis(1500);
 
 fn throttle(settings: &Settings) -> std::time::Duration {
     std::time::Duration::from_millis(u64::from(settings.update_interval_ms.clamp(16, 2000)))
