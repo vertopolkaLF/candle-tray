@@ -7,7 +7,7 @@ use gpui::{
 use super::kit::{self, Button, Kit, Row, SliderRange};
 use super::window::SettingsWindow;
 use crate::monitors::{BrightnessBackend, MonitorKind};
-use crate::settings::{Language, PopupMaterial, Theme};
+use crate::settings::{Language, PopupMaterial, Theme, TrayIcon};
 
 /// Update intervals offered while dragging, in milliseconds.
 const UPDATE_INTERVALS: [u32; 5] = [50, 100, 250, 500, 1000];
@@ -55,6 +55,22 @@ impl SettingsWindow {
             PopupMaterial::Mica => 1,
             PopupMaterial::Solid => 2,
         };
+        let tray_icon_labels: Vec<SharedString> = TrayIcon::ALL
+            .iter()
+            .map(|icon| {
+                tr(match icon {
+                    TrayIcon::Fire => "settings-tray-icon-fire",
+                    TrayIcon::Sun => "settings-tray-icon-sun",
+                    TrayIcon::BrightnessHigh => "settings-tray-icon-brightness-high",
+                    TrayIcon::BrightnessLow => "settings-tray-icon-brightness-low",
+                    TrayIcon::Lightbulb => "settings-tray-icon-lightbulb",
+                })
+            })
+            .collect();
+        let tray_icon_index = TrayIcon::ALL
+            .iter()
+            .position(|icon| *icon == s.tray_icon)
+            .unwrap_or(0) as i32;
         let appearance = kit::card_of(k, |k| {
             vec![
                 kit::dropdown_row(
@@ -108,6 +124,19 @@ impl SettingsWindow {
                             _ => PopupMaterial::Acrylic,
                         };
                         this.edit(cx, move |settings| settings.popup_material = material);
+                    }),
+                ),
+                kit::dropdown_row(
+                    k,
+                    "general-tray-icon",
+                    tr("settings-tray-icon"),
+                    None,
+                    tray_icon_labels,
+                    tray_icon_index,
+                    false,
+                    Self::h(cx, |this, index: usize, _, cx| {
+                        let icon = TrayIcon::ALL.get(index).copied().unwrap_or_default();
+                        this.edit(cx, move |settings| settings.tray_icon = icon);
                     }),
                 ),
             ]

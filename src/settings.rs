@@ -48,6 +48,28 @@ pub enum PopupMaterial {
     Solid,
 }
 
+/// Glyph shown in the notification area.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayIcon {
+    #[default]
+    Fire,
+    Sun,
+    BrightnessHigh,
+    BrightnessLow,
+    Lightbulb,
+}
+
+impl TrayIcon {
+    pub const ALL: [Self; 5] = [
+        Self::Fire,
+        Self::Sun,
+        Self::BrightnessHigh,
+        Self::BrightnessLow,
+        Self::Lightbulb,
+    ];
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOffSetting {
@@ -109,6 +131,7 @@ pub struct Settings {
     pub language: Language,
     pub theme: Theme,
     pub popup_material: PopupMaterial,
+    pub tray_icon: TrayIcon,
     pub launch_at_startup: bool,
     /// Re-apply the last levels on startup, resume and display changes.
     pub restore_levels: bool,
@@ -131,6 +154,7 @@ impl Default for Settings {
             language: Language::System,
             theme: Theme::Auto,
             popup_material: PopupMaterial::Acrylic,
+            tray_icon: TrayIcon::Fire,
             launch_at_startup: true,
             restore_levels: true,
             link_levels: false,

@@ -33,6 +33,7 @@ fn run() -> Result<()> {
     let settings = store.snapshot();
     candle_tray::i18n::set_language(settings.language);
     popup::apply_popup_appearance(settings.popup_material);
+    candle_tray::tray::set_icon(settings.tray_icon);
     if let Err(error) = candle_tray::autostart::set_enabled(settings.launch_at_startup) {
         logger::error(format!("could not apply startup registration: {error:#}"));
     }

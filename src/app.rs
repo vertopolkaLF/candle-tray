@@ -429,6 +429,9 @@ impl AppModel {
         if now.popup_material != before.popup_material {
             crate::popup::apply_popup_appearance(now.popup_material);
         }
+        if now.tray_icon != before.tray_icon {
+            crate::tray::set_icon(now.tray_icon);
+        }
         if now.language != before.language {
             crate::i18n::set_language(now.language);
             crate::tray::refresh_menu();
