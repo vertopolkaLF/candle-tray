@@ -411,6 +411,7 @@ mod tests {
             backend: BrightnessBackend::Ddc { vcp: 0x10 },
             brightness: Some(50),
             sdr: None,
+            contrast: None,
             supports_ddc_power: false,
             powered_off: false,
             unresponsive: false,

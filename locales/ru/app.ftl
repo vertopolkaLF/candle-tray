@@ -76,3 +76,5 @@ monitors-kind-external = Внешний
 monitors-footnote = Настройки отключённых дисплеев сохраняются и применяются снова при подключении.
 popup-powered-off = Выключен
 popup-power = Включить или выключить дисплей
+monitors-contrast = Ползунок контраста
+monitors-contrast-description = Показывать на панели ползунок контраста для этого дисплея.

@@ -11,6 +11,7 @@
 //! - WMI `root\wmi` `WmiMonitorBrightness` / `WmiMonitorBrightnessMethods`
 //!   (internal laptop panels).
 //! - SDR white level for displays with HDR active (DisplayConfig).
+//! - Contrast through DDC/CI VCP 0x12 where the display answers it.
 //!
 //! Identity: every display is keyed by the instance part of its device path
 //! (`\\?\DISPLAY#<model>#<instance>#{guid}` → `<instance>`, trimmed at the
@@ -91,6 +92,9 @@ pub struct Monitor {
     pub brightness: Option<u8>,
     /// Present only while HDR (advanced color) is active on the display.
     pub sdr: Option<SdrLevel>,
+    /// Current DDC/CI contrast percent (VCP 0x12), `None` when the display
+    /// does not answer it.
+    pub contrast: Option<u8>,
     /// The display reported VCP 0xD6 (power mode) in its capabilities.
     pub supports_ddc_power: bool,
     /// Switched off through DDC/CI (VCP 0xD6) by this app.
@@ -121,6 +125,9 @@ pub enum Command {
     /// Re-enumerate displays and re-read every level. Emits
     /// [`Event::Snapshot`] when done.
     Refresh,
+    /// Re-read the current levels of connected displays through the handles
+    /// already open (no re-enumeration). Emits [`Event::Updated`] per display.
+    ReadLevels,
     /// Coalesced: only the latest value per monitor is written, at most once
     /// per throttle interval, and the final value is always written.
     SetBrightness {
@@ -128,6 +135,10 @@ pub enum Command {
         percent: u8,
     },
     SetSdr {
+        id: MonitorId,
+        percent: u8,
+    },
+    SetContrast {
         id: MonitorId,
         percent: u8,
     },
@@ -152,6 +163,7 @@ pub struct LevelTarget {
     pub id: MonitorId,
     pub brightness: Option<u8>,
     pub sdr: Option<u8>,
+    pub contrast: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

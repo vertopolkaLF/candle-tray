@@ -940,7 +940,10 @@ impl PopupRoot {
                 .collect::<Vec<_>>()
                 .join(", ");
             body.push(self.render_linked_card(average as u8, names, inner_width, cx));
-            for row in rows.iter().filter(|row| row.monitor.sdr.is_some()) {
+            for row in rows
+                .iter()
+                .filter(|row| row.monitor.sdr.is_some() || row.contrast().is_some())
+            {
                 body.push(self.render_monitor_card(row, true, inner_width, cx));
             }
         } else {
@@ -1135,6 +1138,17 @@ impl PopupRoot {
             .gap(px(8.0))
             .child(icon(leading_icon, 18.0, palette.text_secondary))
             .child(div().flex_1().min_w_0().child(slider))
+            .child(
+                // Fixed width keeps the track still while the digits change.
+                div()
+                    .flex_none()
+                    .w(px(28.0))
+                    .flex()
+                    .justify_end()
+                    .text_size(px(14.0))
+                    .text_color(palette.text_secondary)
+                    .child(SharedString::from(value.to_string())),
+            )
             .into_any_element()
     }
 
@@ -1152,7 +1166,7 @@ impl PopupRoot {
         let header = self.card_header(
             "fluent-link",
             crate::i18n::tr("popup-all-displays").to_owned(),
-            Some(format!("{value}")),
+            None,
             Some((names, self.palette.text_secondary)),
             None,
         );
@@ -1181,11 +1195,9 @@ impl PopupRoot {
         };
         let unresponsive = row.monitor.unresponsive;
         let off = row.monitor.powered_off;
+        // Off shows in the trailing slot: a caption line would grow the card.
         let caption = if off {
-            Some((
-                crate::i18n::tr("popup-powered-off").to_owned(),
-                palette.text_tertiary,
-            ))
+            None
         } else if unresponsive {
             Some((
                 crate::i18n::tr("popup-unresponsive").to_owned(),
@@ -1199,10 +1211,7 @@ impl PopupRoot {
         } else {
             None
         };
-        let trailing = (!sdr_only).then(|| {
-            row.slider
-                .map_or_else(|| "–".to_owned(), |value| value.to_string())
-        });
+        let trailing = off.then(|| crate::i18n::tr("popup-powered-off").to_owned());
         let power = matches!(row.monitor.backend, BrightnessBackend::Ddc { .. })
             .then(|| self.power_button(&row.monitor.id, off, cx));
         let enabled = !unresponsive && !off;
@@ -1226,6 +1235,21 @@ impl PopupRoot {
                 cx,
             ));
         }
+        if let Some(contrast) = row.contrast() {
+            let model = self.model.clone();
+            let id = row.monitor.id.clone();
+            let on_change: slider::Handler = Rc::new(move |value, _, cx| {
+                model.update(cx, |model, cx| model.set_contrast(&id, value, cx));
+            });
+            card = card.child(self.slider_row(
+                format!("contrast-{}", row.monitor.id),
+                "fluent-contrast",
+                contrast,
+                enabled,
+                on_change,
+                cx,
+            ));
+        }
         if let Some(sdr) = row.monitor.sdr {
             let model = self.model.clone();
             let id = row.monitor.id.clone();
@@ -1233,18 +1257,7 @@ impl PopupRoot {
                 model.update(cx, |model, cx| model.set_sdr(&id, value, cx));
             });
             card = card
-                .child(
-                    div()
-                        .pt(px(4.0))
-                        .flex()
-                        .flex_row()
-                        .justify_between()
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .text_color(palette.text_secondary)
-                        .child(SharedString::from(crate::i18n::tr("popup-sdr").to_owned()))
-                        .child(SharedString::from(sdr.percent.to_string())),
-                )
+                .child(self.level_label("popup-sdr"))
                 .child(self.slider_row(
                     format!("sdr-{}", row.monitor.id),
                     "fluent-brightness",
@@ -1255,6 +1268,16 @@ impl PopupRoot {
                 ));
         }
         card.into_any_element()
+    }
+
+    /// Caption above a secondary slider.
+    fn level_label(&self, key: &str) -> gpui::Div {
+        div()
+            .pt(px(4.0))
+            .text_size(px(12.0))
+            .line_height(px(16.0))
+            .text_color(self.palette.text_secondary)
+            .child(SharedString::from(crate::i18n::tr(key).to_owned()))
     }
 
     fn render_footer(&mut self, cx: &mut Context<Self>) -> AnyElement {

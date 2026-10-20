@@ -18,6 +18,7 @@ use std::{
 enum Level {
     Brightness,
     Sdr,
+    Contrast,
 }
 /// Clock values are supplied by the coordinator, making coalescing deterministic.
 #[derive(Default)]
@@ -30,7 +31,7 @@ impl Throttle {
         self.pending.insert(target, percent.min(100));
     }
     fn take(&mut self, now: Duration, interval: Duration) -> Option<(Level, u8)> {
-        let target = [Level::Brightness, Level::Sdr]
+        let target = [Level::Brightness, Level::Sdr, Level::Contrast]
             .into_iter()
             .filter(|t| {
                 self.pending.contains_key(t)
@@ -47,6 +48,9 @@ impl Throttle {
 enum Work {
     Probe(Target, Arc<Vec<Target>>),
     Capabilities,
+    /// Re-read levels through the open handles, keeping the last known value
+    /// of any read that fails.
+    Read,
     Write(Level, u8),
     /// VCP 0xD6: `true` = on (1), `false` = DPM off (4). DPM off keeps the
     /// monitor listening on DDC/CI, so it can be switched back on.
@@ -70,6 +74,8 @@ struct Slot {
     capabilities: bool,
     /// Requested DDC power state, not yet written.
     power: Option<bool>,
+    /// Levels should be re-read once pending writes have landed.
+    read: bool,
     awaiting_probe: bool,
     active: bool,
 }
@@ -81,6 +87,7 @@ impl Slot {
             && self.refresh.is_none()
             && !self.capabilities
             && self.power.is_none()
+            && !self.read
     }
     fn expire(&mut self, now: Instant) -> bool {
         if self
@@ -104,8 +111,24 @@ impl Slot {
         }
     }
 }
+/// VCP code of the contrast control.
+const CONTRAST: u8 = 0x12;
+/// Hardware handles a worker keeps between requests.
+struct Handles {
+    target: Target,
+    ddc: Option<ddc::Ddc>,
+    wmi: Option<wmi::Wmi>,
+    /// DDC maximum of the brightness code.
+    max: u32,
+    /// DDC maximum of the contrast code.
+    contrast_max: u32,
+}
+/// Scale a DDC reading to percent.
+fn percent(current: u32, max: u32) -> u8 {
+    (u64::from(current) * 100 / u64::from(max.max(1))).min(100) as u8
+}
 fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
-    let mut state: Option<(Target, Option<ddc::Ddc>, Option<wmi::Wmi>, u32)> = None;
+    let mut state: Option<Handles> = None;
     while let Ok(request) = receiver.recv() {
         match request.work {
             Work::Probe(mut target, targets) => {
@@ -115,7 +138,7 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                 // last power write established.
                 let was_off = state
                     .as_ref()
-                    .is_some_and(|(previous, ..)| previous.monitor.powered_off);
+                    .is_some_and(|previous| previous.target.monitor.powered_off);
                 target.monitor.powered_off = was_off;
                 drop(state.take());
                 let wmi = wmi::Wmi::connect()
@@ -126,6 +149,7 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                 }
                 let brightness = wmi.as_ref().and_then(|w| w.brightness(&target.monitor.id));
                 let mut max = 100;
+                let mut contrast_max = 100;
                 let ddc = if let Some(brightness) = brightness {
                     target.monitor.kind = MonitorKind::Internal;
                     target.monitor.backend = BrightnessBackend::Wmi;
@@ -138,71 +162,122 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                             if let Some((current, maximum)) = d.read(code) {
                                 max = maximum;
                                 target.monitor.backend = BrightnessBackend::Ddc { vcp: code };
-                                target.monitor.brightness = Some(
-                                    ((u64::from(current) * 100 / u64::from(max)).min(100)) as u8,
-                                );
+                                target.monitor.brightness = Some(percent(current, max));
                                 break;
                             }
                         }
+                        target.monitor.contrast = d.read(CONTRAST).map(|(current, maximum)| {
+                            contrast_max = maximum;
+                            percent(current, maximum)
+                        });
                     }
                     ddc
                 };
                 target.monitor.sdr = hdr::read(&target);
-                state = Some((target, ddc, wmi, max));
+                state = Some(Handles {
+                    target,
+                    ddc,
+                    wmi,
+                    max,
+                    contrast_max,
+                });
             }
             Work::Capabilities => {
-                if let Some((target, ddc, _, _)) = &mut state {
-                    target.monitor.supports_ddc_power =
-                        ddc.as_ref().is_some_and(|d| d.power_supported());
+                if let Some(h) = &mut state {
+                    h.target.monitor.supports_ddc_power =
+                        h.ddc.as_ref().is_some_and(|d| d.power_supported());
+                }
+            }
+            Work::Read => {
+                if let Some(h) = &mut state {
+                    let brightness = match h.target.monitor.backend {
+                        BrightnessBackend::Ddc { vcp } => h
+                            .ddc
+                            .as_ref()
+                            .and_then(|d| d.read(vcp))
+                            .map(|(current, maximum)| {
+                                h.max = maximum;
+                                percent(current, maximum)
+                            }),
+                        BrightnessBackend::Wmi => h
+                            .wmi
+                            .as_ref()
+                            .and_then(|w| w.brightness(&h.target.monitor.id)),
+                        BrightnessBackend::Unsupported => None,
+                    };
+                    if brightness.is_some() {
+                        h.target.monitor.brightness = brightness;
+                    }
+                    if h.target.monitor.contrast.is_some()
+                        && let Some((current, maximum)) =
+                            h.ddc.as_ref().and_then(|d| d.read(CONTRAST))
+                    {
+                        h.contrast_max = maximum;
+                        h.target.monitor.contrast = Some(percent(current, maximum));
+                    }
+                    if h.target.monitor.sdr.is_some() {
+                        h.target.monitor.sdr = hdr::read(&h.target).or(h.target.monitor.sdr);
+                    }
                 }
             }
             Work::Power(on) => {
-                if let Some((target, ddc, _, _)) = &mut state {
-                    match ddc {
+                if let Some(h) = &mut state {
+                    match &h.ddc {
                         Some(ddc) if ddc.set(0xd6, if on { 1 } else { 4 }) => {
-                            target.monitor.powered_off = !on;
+                            h.target.monitor.powered_off = !on;
                         }
-                        _ => log(format!("DDC power failed: {}", target.monitor.id)),
+                        _ => log(format!("DDC power failed: {}", h.target.monitor.id)),
                     }
                 }
             }
             Work::Write(level, percent) => {
-                if let Some((target, ddc, wmi, max)) = &mut state {
+                if let Some(h) = &mut state {
+                    let scaled = |max: u32| (u64::from(percent) * u64::from(max) / 100) as u32;
                     let ok = match level {
-                        Level::Sdr => target.monitor.sdr.is_some() && hdr::set(target, percent),
-                        Level::Brightness => match target.monitor.backend {
-                            BrightnessBackend::Ddc { vcp } => ddc.as_ref().is_some_and(|d| {
-                                d.set(vcp, (u64::from(percent) * u64::from(*max) / 100) as u32)
-                            }),
-                            BrightnessBackend::Wmi => wmi
+                        Level::Sdr => {
+                            h.target.monitor.sdr.is_some() && hdr::set(&h.target, percent)
+                        }
+                        Level::Contrast => {
+                            h.target.monitor.contrast.is_some()
+                                && h.ddc
+                                    .as_ref()
+                                    .is_some_and(|d| d.set(CONTRAST, scaled(h.contrast_max)))
+                        }
+                        Level::Brightness => match h.target.monitor.backend {
+                            BrightnessBackend::Ddc { vcp } => {
+                                h.ddc.as_ref().is_some_and(|d| d.set(vcp, scaled(h.max)))
+                            }
+                            BrightnessBackend::Wmi => h
+                                .wmi
                                 .as_ref()
-                                .is_some_and(|w| w.set(&target.monitor.id, percent).is_ok()),
+                                .is_some_and(|w| w.set(&h.target.monitor.id, percent).is_ok()),
                             BrightnessBackend::Unsupported => false,
                         },
                     };
                     if ok {
                         match level {
-                            Level::Brightness => target.monitor.brightness = Some(percent),
-                            Level::Sdr => target.monitor.sdr = Some(SdrLevel { percent }),
+                            Level::Brightness => h.target.monitor.brightness = Some(percent),
+                            Level::Sdr => h.target.monitor.sdr = Some(SdrLevel { percent }),
+                            Level::Contrast => h.target.monitor.contrast = Some(percent),
                         }
                     } else {
                         if level == Level::Brightness {
-                            target.monitor.brightness = None;
+                            h.target.monitor.brightness = None;
                         }
                         log(format!(
                             "Hardware write failed: {} {level:?}",
-                            target.monitor.id
+                            h.target.monitor.id
                         ));
                     }
                 }
             }
         }
-        if let Some((target, _, _, _)) = &state
+        if let Some(h) = &state
             && sender
                 .send(Reply {
-                    id: target.monitor.id.clone(),
+                    id: h.target.monitor.id.clone(),
                     operation: request.operation,
-                    monitor: target.monitor.clone(),
+                    monitor: h.target.monitor.clone(),
                 })
                 .is_err()
         {
@@ -269,6 +344,16 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 Ok(Command::Shutdown) | Err(mpsc::TryRecvError::Disconnected) => return,
                 Err(mpsc::TryRecvError::Empty) => break,
                 Ok(Command::Refresh) => refresh = Some(SnapshotReason::Requested),
+                Ok(Command::ReadLevels) => {
+                    // A display in DPM off may not answer; a pending probe
+                    // reads levels anyway.
+                    for s in slots
+                        .values_mut()
+                        .filter(|s| s.active && s.refresh.is_none() && !s.monitor.powered_off)
+                    {
+                        s.read = true;
+                    }
+                }
                 Ok(Command::SetThrottle(value)) => throttle = value,
                 Ok(Command::SetBrightness { id, percent }) => {
                     if let Some(s) = slots.get_mut(&id).filter(|s| s.active) {
@@ -280,6 +365,11 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                         s.throttle.set(Level::Sdr, percent);
                     }
                 }
+                Ok(Command::SetContrast { id, percent }) => {
+                    if let Some(s) = slots.get_mut(&id).filter(|s| s.active) {
+                        s.throttle.set(Level::Contrast, percent);
+                    }
+                }
                 Ok(Command::Apply(targets)) => {
                     for t in targets {
                         if let Some(s) = slots.get_mut(&t.id).filter(|s| s.active) {
@@ -288,6 +378,9 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                             }
                             if let Some(p) = t.sdr {
                                 s.throttle.set(Level::Sdr, p);
+                            }
+                            if let Some(p) = t.contrast {
+                                s.throttle.set(Level::Contrast, p);
                             }
                         }
                     }
@@ -355,6 +448,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                             slot.throttle.pending.clear();
                             slot.capabilities = false;
                             slot.power = None;
+                            slot.read = false;
                         }
                     }
                     for target in targets.iter() {
@@ -373,11 +467,13 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                                 refresh: None,
                                 capabilities: false,
                                 power: None,
+                                read: false,
                                 awaiting_probe: false,
                                 active: true,
                             }
                         });
                         slot.refresh = Some((target.clone(), targets.clone()));
+                        slot.read = false;
                         slot.awaiting_probe = true;
                         slot.capabilities = true;
                         if slot.monitor.unresponsive {
@@ -449,6 +545,10 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 (Work::Write(level, p), Duration::from_secs(3))
             } else if let Some(on) = slot.power.take() {
                 (Work::Power(on), Duration::from_secs(3))
+            } else if slot.read && slot.throttle.pending.is_empty() {
+                // After pending writes, so the read reports what they set.
+                slot.read = false;
+                (Work::Read, Duration::from_secs(3))
             } else if slot.capabilities {
                 slot.capabilities = false;
                 (Work::Capabilities, Duration::from_secs(15))
@@ -515,6 +615,7 @@ mod tests {
                 backend: BrightnessBackend::Unsupported,
                 brightness: None,
                 sdr: None,
+                contrast: None,
                 supports_ddc_power: false,
                 powered_off: false,
                 unresponsive: false,
@@ -525,6 +626,7 @@ mod tests {
             refresh: None,
             capabilities: false,
             power: None,
+            read: false,
             awaiting_probe: true,
             active: true,
         }

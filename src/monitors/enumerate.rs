@@ -127,6 +127,7 @@ pub(super) fn enumerate() -> windows::core::Result<Vec<Target>> {
                     backend: BrightnessBackend::Unsupported,
                     brightness: None,
                     sdr: None,
+                    contrast: None,
                     supports_ddc_power: false,
                     powered_off: false,
                     unresponsive: false,

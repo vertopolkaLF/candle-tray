@@ -229,6 +229,7 @@ fn handle_command(
 ) {
     match command {
         PopupCommand::Show { anchor } => {
+            let _ = model.update(cx, |model, _| model.read_levels());
             #[cfg(windows)]
             {
                 let plan = window

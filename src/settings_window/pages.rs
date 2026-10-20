@@ -260,6 +260,25 @@ impl SettingsWindow {
                 }),
             );
 
+            // Only displays that answer VCP 0x12 get the option.
+            let contrast =
+                (row.monitor.contrast.is_some() || row.settings.show_contrast).then(|| {
+                    let contrast_id = id.clone();
+                    kit::toggle_row(
+                        k,
+                        format!("contrast-{id}"),
+                        tr("monitors-contrast"),
+                        Some(tr("monitors-contrast-description")),
+                        row.settings.show_contrast,
+                        Self::h(cx, move |this, value: bool, _, cx| {
+                            let id = contrast_id.clone();
+                            this.edit(cx, move |settings| {
+                                settings.monitors.entry(id).or_default().show_contrast = value;
+                            });
+                        }),
+                    )
+                });
+
             let min_id = id.clone();
             let min = row.settings.min;
             let max = row.settings.max;
@@ -369,20 +388,26 @@ impl SettingsWindow {
             let details_text = kit::text(details, 14.0, k.theme.text_secondary).into_any_element();
 
             let card = kit::card_of(k, |k| {
-                vec![
+                let mut rows = vec![
                     Row::new(format!("name-row-{id}"), tr("monitors-rename"))
                         .trailing(name_field)
                         .render(k),
                     hidden,
                     min_row,
                     max_row,
+                ];
+                rows.extend(contrast);
+                rows.push(
                     Row::new(format!("order-row-{id}"), tr("monitors-order"))
                         .trailing(order)
                         .render(k),
+                );
+                rows.push(
                     Row::new(format!("info-row-{id}"), tr("monitors-info"))
                         .trailing(details_text)
                         .render(k),
-                ]
+                );
+                rows
             });
             page.push(card);
         }

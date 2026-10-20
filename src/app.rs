@@ -45,6 +45,16 @@ pub struct MonitorRow {
     pub slider: Option<u8>,
 }
 
+impl MonitorRow {
+    /// Contrast for the flyout: the display answers VCP 0x12 and the user
+    /// chose to show it.
+    pub fn contrast(&self) -> Option<u8> {
+        self.monitor
+            .contrast
+            .filter(|_| self.settings.show_contrast)
+    }
+}
+
 impl AppModel {
     pub fn new(settings: Settings, service: Arc<MonitorService>, persist: PersistFn) -> Self {
         service.send(Command::SetThrottle(throttle(&settings)));
@@ -94,13 +104,16 @@ impl AppModel {
                         .local_edits
                         .get(&monitor.id)
                         .is_some_and(|at| at.elapsed() < LOCAL_EDIT_HOLD);
-                    let (brightness, sdr) = (slot.brightness, slot.sdr);
+                    let (brightness, sdr, contrast) = (slot.brightness, slot.sdr, slot.contrast);
                     *slot = monitor;
                     if recent || slot.brightness.is_none() {
                         slot.brightness = brightness.or(slot.brightness);
                     }
                     if recent && slot.sdr.is_some() {
                         slot.sdr = sdr.or(slot.sdr);
+                    }
+                    if recent && slot.contrast.is_some() {
+                        slot.contrast = contrast.or(slot.contrast);
                     }
                 } else {
                     self.monitors.push(monitor);
@@ -129,6 +142,12 @@ impl AppModel {
                 && let Some(sdr) = monitor.sdr
             {
                 entry.last_sdr = Some(sdr.percent);
+                changed = true;
+            }
+            if entry.last_contrast.is_none()
+                && let Some(contrast) = monitor.contrast
+            {
+                entry.last_contrast = Some(contrast);
                 changed = true;
             }
         }
@@ -258,6 +277,25 @@ impl AppModel {
         cx.notify();
     }
 
+    pub fn set_contrast(&mut self, id: &str, percent: u8, cx: &mut Context<Self>) {
+        let percent = percent.min(100);
+        self.settings
+            .monitors
+            .entry(id.to_owned())
+            .or_default()
+            .last_contrast = Some(percent);
+        if let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) {
+            monitor.contrast = Some(percent);
+        }
+        self.local_edits.insert(id.to_owned(), Instant::now());
+        self.service.send(Command::SetContrast {
+            id: id.to_owned(),
+            percent,
+        });
+        self.save();
+        cx.notify();
+    }
+
     /// Offer a one-time Twinkle Tray import (first run only).
     pub fn offer_import(&mut self, pending: PendingImport, cx: &mut Context<Self>) {
         if !self.settings.twinkle_import_done {
@@ -339,6 +377,11 @@ impl AppModel {
         self.service.send(Command::Refresh);
     }
 
+    /// Pick up levels changed outside the app (monitor buttons, other tools).
+    pub fn read_levels(&self) {
+        self.service.send(Command::ReadLevels);
+    }
+
     /// Apply a settings change live, then persist it.
     pub fn edit(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Settings)) {
         let before = self.settings.clone();
@@ -404,6 +447,7 @@ impl AppModel {
                         id: monitor.id.clone(),
                         brightness: Some(levels::to_hardware(slider, entry.min, entry.max)),
                         sdr: None,
+                        contrast: None,
                     })
                 })
                 .collect();
@@ -448,10 +492,14 @@ pub fn restore_targets(
             let sdr = entry
                 .last_sdr
                 .filter(|percent| monitor.sdr.is_some_and(|now| now.percent != *percent));
-            (brightness.is_some() || sdr.is_some()).then(|| LevelTarget {
+            let contrast = entry
+                .last_contrast
+                .filter(|percent| monitor.contrast.is_some_and(|now| now != *percent));
+            (brightness.is_some() || sdr.is_some() || contrast.is_some()).then(|| LevelTarget {
                 id: monitor.id.clone(),
                 brightness,
                 sdr,
+                contrast,
             })
         })
         .collect()
@@ -474,6 +522,7 @@ mod tests {
             backend: BrightnessBackend::Ddc { vcp: 0x10 },
             brightness,
             sdr: sdr.map(|percent| SdrLevel { percent }),
+            contrast: None,
             supports_ddc_power: false,
             powered_off: false,
             unresponsive: false,
@@ -547,5 +596,29 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].brightness, None);
         assert_eq!(targets[0].sdr, Some(30));
+    }
+
+    #[test]
+    fn contrast_restores_independently() {
+        let settings = settings_with(
+            "a",
+            MonitorSettings {
+                last_contrast: Some(70),
+                ..Default::default()
+            },
+        );
+        let mut drifted = monitor("a", Some(40), None);
+        drifted.contrast = Some(50);
+        let targets = restore_targets(&[drifted], &settings, &SnapshotReason::Resumed);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].brightness, None);
+        assert_eq!(targets[0].contrast, Some(70));
+        // Displays without a contrast control are never written.
+        let unsupported = restore_targets(
+            &[monitor("a", Some(40), None)],
+            &settings,
+            &SnapshotReason::Resumed,
+        );
+        assert!(unsupported.is_empty());
     }
 }

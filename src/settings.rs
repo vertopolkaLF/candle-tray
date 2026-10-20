@@ -81,6 +81,10 @@ pub struct MonitorSettings {
     pub last_brightness: Option<u8>,
     /// Last SDR white level percent, restored the same way.
     pub last_sdr: Option<u8>,
+    /// Show a contrast slider in the flyout (DDC/CI displays only).
+    pub show_contrast: bool,
+    /// Last contrast percent, restored the same way.
+    pub last_contrast: Option<u8>,
 }
 
 impl Default for MonitorSettings {
@@ -92,6 +96,8 @@ impl Default for MonitorSettings {
             max: 100,
             last_brightness: None,
             last_sdr: None,
+            show_contrast: false,
+            last_contrast: None,
         }
     }
 }
