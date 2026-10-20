@@ -903,7 +903,11 @@ impl PopupRoot {
         let rows = model.rows();
         let linked = model.settings.link_levels;
         let loaded = model.loaded;
+        let offer = model.import_offer.is_some();
         let mut body = Vec::new();
+        if offer {
+            body.push(self.render_import_offer(cx));
+        }
         if rows.is_empty() {
             let text = if loaded {
                 crate::i18n::tr("popup-no-displays")
@@ -945,6 +949,96 @@ impl PopupRoot {
             }
         }
         body
+    }
+
+    /// First-run card offering to import Twinkle Tray settings.
+    fn render_import_offer(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.palette.clone();
+        let accept_model = self.model.clone();
+        let decline_model = self.model.clone();
+        let accept = self.text_button(
+            "import-yes",
+            crate::i18n::tr("import-prompt-yes"),
+            true,
+            move |_, _, cx| accept_model.update(cx, |model, cx| model.answer_import(true, cx)),
+            cx,
+        );
+        let decline = self.text_button(
+            "import-no",
+            crate::i18n::tr("import-prompt-no"),
+            false,
+            move |_, _, cx| decline_model.update(cx, |model, cx| model.answer_import(false, cx)),
+            cx,
+        );
+        self.card()
+            .pb(px(12.0))
+            .gap(px(4.0))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(SharedString::from(crate::i18n::tr("import-prompt-title"))),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .line_height(px(16.0))
+                    .text_color(palette.text_secondary)
+                    .child(SharedString::from(crate::i18n::tr("import-prompt-body"))),
+            )
+            .child(
+                div()
+                    .pt(px(6.0))
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.0))
+                    .child(accept)
+                    .child(decline),
+            )
+            .into_any_element()
+    }
+
+    /// Fluent accent or standard button with a hover fade.
+    fn text_button(
+        &mut self,
+        id: &'static str,
+        label: String,
+        accent: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette = self.palette.clone();
+        let hover_id = fx::key(("button", id));
+        let hovered = self.hovered(hover_id);
+        let hover = self
+            .fx
+            .toggle(fx::key(("button-hover", id)), hovered, fx::FASTER);
+        let (background, text) = if accent {
+            // WinUI accent buttons fade to 90% on hover.
+            (
+                palette.accent.opacity(1.0 - 0.1 * hover),
+                palette.text_on_accent,
+            )
+        } else {
+            (
+                palette.control_fill.mix(palette.subtle_fill, hover),
+                palette.text_primary,
+            )
+        };
+        div()
+            .id(eid(format!("button-{id}")))
+            .h(px(30.0))
+            .px(px(14.0))
+            .flex()
+            .items_center()
+            .rounded(px(palette.control_radius))
+            .bg(background)
+            .border_1()
+            .border_color(palette.card_stroke)
+            .text_color(text)
+            .on_hover(self.hover_listener(hover_id, cx))
+            .on_click(on_click)
+            .child(SharedString::from(label))
+            .into_any_element()
     }
 
     fn card(&self) -> gpui::Div {

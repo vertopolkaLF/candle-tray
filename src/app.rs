@@ -11,6 +11,7 @@ use crate::monitors::{
     Command, Event, LevelTarget, Monitor, MonitorService, SnapshotReason, TurnOffMode,
 };
 use crate::settings::{MonitorSettings, Settings};
+use crate::twinkle_import::PendingImport;
 
 /// Persists a settings snapshot off the UI thread (the serial settings
 /// writer). Called after every edit.
@@ -22,6 +23,11 @@ pub struct AppModel {
     /// A first hardware snapshot arrived; before that the popup shows a
     /// loading state instead of "No displays found".
     pub loaded: bool,
+    /// Twinkle Tray settings found on first run, waiting for the user's
+    /// answer in the popup.
+    pub import_offer: Option<PendingImport>,
+    /// Accepted import whose name-keyed entries resolve on the next snapshot.
+    import_pending: Option<PendingImport>,
     service: Arc<MonitorService>,
     persist: PersistFn,
 }
@@ -43,6 +49,8 @@ impl AppModel {
             monitors: Vec::new(),
             settings,
             loaded: false,
+            import_offer: None,
+            import_pending: None,
             service,
             persist,
         }
@@ -55,6 +63,13 @@ impl AppModel {
             Event::Snapshot { monitors, reason } => {
                 self.monitors = monitors;
                 self.loaded = true;
+                if let Some(pending) = self.import_pending.take() {
+                    let before = self.settings.clone();
+                    let report = pending.resolve(&self.monitors, &mut self.settings);
+                    crate::logger::info(format!("Twinkle Tray import resolved: {report:?}"));
+                    self.apply_runtime_effects(&before);
+                    self.save();
+                }
                 if self.settings.restore_levels {
                     let targets = restore_targets(&self.monitors, &self.settings, &reason);
                     if !targets.is_empty() {
@@ -221,6 +236,42 @@ impl AppModel {
         });
         self.save();
         cx.notify();
+    }
+
+    /// Offer a one-time Twinkle Tray import (first run only).
+    pub fn offer_import(&mut self, pending: PendingImport, cx: &mut Context<Self>) {
+        if !self.settings.twinkle_import_done {
+            self.import_offer = Some(pending);
+            cx.notify();
+        }
+    }
+
+    /// The user answered the import offer, or imported from Settings.
+    pub fn answer_import(&mut self, accept: bool, cx: &mut Context<Self>) {
+        let offer = self.import_offer.take();
+        if accept && let Some(pending) = offer {
+            self.run_import(pending, cx);
+        }
+        self.edit(cx, |settings| settings.twinkle_import_done = true);
+    }
+
+    /// Apply an import now; names resolve against the current (or next)
+    /// snapshot.
+    pub fn run_import(&mut self, pending: PendingImport, cx: &mut Context<Self>) -> usize {
+        let before = self.settings.clone();
+        let report = if self.loaded {
+            pending.resolve(&self.monitors, &mut self.settings)
+        } else {
+            let report = pending.apply(&mut self.settings);
+            self.import_pending = Some(pending);
+            report
+        };
+        crate::logger::info(format!("Twinkle Tray import: {report:?}"));
+        self.settings.twinkle_import_done = true;
+        self.apply_runtime_effects(&before);
+        self.save();
+        cx.notify();
+        report.monitors
     }
 
     pub fn toggle_link_levels(&mut self, cx: &mut Context<Self>) {

@@ -7,5 +7,7 @@ pub mod monitors;
 pub mod popup;
 pub mod settings;
 pub mod settings_window;
+pub mod single_instance;
 pub mod theme;
 pub mod tray;
+pub mod twinkle_import;

@@ -5,31 +5,57 @@ use std::sync::Arc;
 use anyhow::Result;
 use candle_tray::{
     app::{AppModel, PersistFn},
+    logger,
     monitors::{Command, MonitorService},
     popup::{self, PopupCommand},
-    settings::Settings,
+    settings::{Settings, SettingsStore},
+    single_instance, twinkle_import,
 };
 use gpui::AppContext;
 
 fn run() -> Result<()> {
     let path = Settings::default_path()?;
-    let settings = Settings::load_or_create(&path)?;
+    logger::initialize(&path)?;
+    // A second launch only asks the running instance to show its popup.
+    let Some(instance) = single_instance::acquire()? else {
+        return Ok(());
+    };
+    instance.set_activation_callback(popup::show_near_cursor);
+
+    let store = SettingsStore::open(&path)?;
+    store.edit(|settings| {
+        if let Err(error) = candle_tray::autostart::reconcile(settings) {
+            logger::error(format!(
+                "could not reconcile startup registration: {error:#}"
+            ));
+        }
+    });
+    let settings = store.snapshot();
     candle_tray::i18n::set_language(settings.language);
     popup::apply_popup_appearance(settings.popup_material);
     if let Err(error) = candle_tray::autostart::set_enabled(settings.launch_at_startup) {
-        candle_tray::logger::error(format!("could not apply startup registration: {error:#}"));
+        logger::error(format!("could not apply startup registration: {error:#}"));
     }
+    let import_offer = (!settings.twinkle_import_done)
+        .then(twinkle_import::find)
+        .flatten()
+        .and_then(|path| match twinkle_import::load(&path) {
+            Ok(pending) => Some(pending),
+            Err(error) => {
+                logger::error(format!("could not read Twinkle Tray settings: {error:#}"));
+                None
+            }
+        });
 
     // Hardware events hop onto the GPUI thread through the popup channel.
     let service = Arc::new(MonitorService::start(|event| {
         popup::send_command(PopupCommand::Monitors(event));
     }));
 
-    let persist_path = path.clone();
+    let persist_store = store.clone();
     let persist: PersistFn = Arc::new(move |settings: &Settings| {
-        if let Err(error) = settings.save(&persist_path) {
-            candle_tray::logger::error(format!("could not save settings: {error:#}"));
-        }
+        let settings = settings.clone();
+        persist_store.edit(move |stored| *stored = settings);
     });
 
     let model_service = Arc::clone(&service);
@@ -40,19 +66,29 @@ fn run() -> Result<()> {
             candle_tray::tray::set_tooltip_level(model.read(cx).average_level());
         })
         .detach();
+        if let Some(pending) = import_offer {
+            model.update(cx, |model, cx| model.offer_import(pending, cx));
+        }
         model
     });
 
     let refresh_service = Arc::clone(&service);
-    candle_tray::tray::run(
+    let result = candle_tray::tray::run(
         move || refresh_service.send(Command::Refresh),
         move || service.send(Command::Shutdown),
-    )
+    );
+    if let Err(error) = store.flush() {
+        logger::error(format!("could not save settings on exit: {error:#}"));
+    }
+    drop(instance);
+    result
 }
 
 fn main() {
     if let Err(error) = run() {
-        candle_tray::logger::error(format!("Candle Tray failed to start: {error:#}"));
+        logger::error(format!("Candle Tray failed to start: {error:#}"));
         std::process::exit(1);
     }
+    // The GPUI thread owns no state that needs an orderly shutdown.
+    std::process::exit(0);
 }
