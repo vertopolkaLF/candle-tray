@@ -1166,12 +1166,13 @@ impl PopupRoot {
             .child(icon(leading_icon, 18.0, palette.text_secondary))
             .child(div().flex_1().min_w_0().child(slider))
             .child(
-                // Fixed width keeps the track still while the digits change.
+                // Fixed width keeps the track still while the digits change;
+                // centered digits line up with the header's power button.
                 div()
                     .flex_none()
                     .w(px(28.0))
                     .flex()
-                    .justify_end()
+                    .justify_center()
                     .text_size(px(14.0))
                     .text_color(palette.text_secondary)
                     .child(SharedString::from(value.to_string())),
