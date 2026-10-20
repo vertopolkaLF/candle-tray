@@ -48,10 +48,10 @@ pub enum PopupMaterial {
     Solid,
 }
 
-/// How much the wallpaper lightens the dark acrylic popup.
+/// How much the wallpaper lightens the dark Acrylic or Mica popup.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AcrylicBrightness {
+pub enum BackdropBrightness {
     #[default]
     Normal,
     Bright,
@@ -141,7 +141,7 @@ pub struct Settings {
     pub language: Language,
     pub theme: Theme,
     pub popup_material: PopupMaterial,
-    pub acrylic_brightness: AcrylicBrightness,
+    pub backdrop_brightness: BackdropBrightness,
     pub tray_icon: TrayIcon,
     pub launch_at_startup: bool,
     /// Re-apply the last levels on startup, resume and display changes.
@@ -165,7 +165,7 @@ impl Default for Settings {
             language: Language::System,
             theme: Theme::Auto,
             popup_material: PopupMaterial::Acrylic,
-            acrylic_brightness: AcrylicBrightness::Normal,
+            backdrop_brightness: BackdropBrightness::Normal,
             tray_icon: TrayIcon::Fire,
             launch_at_startup: true,
             restore_levels: true,

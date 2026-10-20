@@ -668,7 +668,7 @@ fn build_palette(
         crate::theme::accent_ramp(),
         crate::popup::background_material(),
         default_font.clone(),
-        settings.acrylic_brightness,
+        settings.backdrop_brightness,
     )
 }
 

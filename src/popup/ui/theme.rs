@@ -6,7 +6,7 @@
 
 use gpui::{Hsla, Rgba, SharedString};
 
-use crate::settings::{AcrylicBrightness, PopupMaterial, Theme};
+use crate::settings::{BackdropBrightness, PopupMaterial, Theme};
 
 pub(crate) fn rgba8(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     Rgba {
@@ -72,13 +72,14 @@ pub(crate) struct Palette {
     pub(crate) chrome_icon: Hsla,
     pub(crate) chrome_icon_hover: Hsla,
     pub(crate) material: PopupMaterial,
-    pub(crate) acrylic_brightness: AcrylicBrightness,
+    pub(crate) backdrop_brightness: BackdropBrightness,
 }
 
 impl Palette {
     /// Luminosity controls backdrop brightness independently of tint opacity,
     /// so a lighter tint can preserve wallpaper hue without washing out on white.
     pub(crate) fn capsule_background(&self, frosted: bool) -> Hsla {
+        let level = self.backdrop_brightness;
         match self.material {
             // Opaque #202020 / #F3F3F3 with no backdrop blur behind it.
             PopupMaterial::Solid => return self.solid_background,
@@ -88,18 +89,22 @@ impl Palette {
                 if !frosted {
                     return self.solid_background;
                 }
-                return self
-                    .solid_background
-                    .opacity(if self.dark { 0.8 } else { 0.5 });
+                let opacity = match (self.dark, level) {
+                    (false, _) => 0.5,
+                    (true, BackdropBrightness::Normal) => 0.8,
+                    (true, BackdropBrightness::Bright) => 0.5,
+                    (true, BackdropBrightness::Brighter) => 0.3,
+                };
+                return self.solid_background.opacity(opacity);
             }
             PopupMaterial::Acrylic => {}
         }
         let opacity = if frosted {
-            match (self.dark, self.acrylic_brightness) {
+            match (self.dark, level) {
                 (false, _) => 0.25,
-                (true, AcrylicBrightness::Normal) => 0.15,
-                (true, AcrylicBrightness::Bright) => 0.08,
-                (true, AcrylicBrightness::Brighter) => 0.0,
+                (true, BackdropBrightness::Normal) => 0.35,
+                (true, BackdropBrightness::Bright) => 0.25,
+                (true, BackdropBrightness::Brighter) => 0.15,
             }
         } else if self.dark {
             0.94
@@ -110,19 +115,18 @@ impl Palette {
     }
 
     /// Lightness source of the Mica/Acrylic backdrop: the Fluent base
-    /// (#202020 dark, near-white light). Dark acrylic is lifted well above
-    /// the WinUI base: measured against Twinkle Tray's flyout, #2C2C2C still
-    /// rendered near #202020 once the tint was composited. The brighter
-    /// steps lift it further for users who want more wallpaper glow.
+    /// (#202020 dark, near-white light). On a dark wallpaper the result lands
+    /// close to this level, so the brighter dark steps target measured
+    /// flyouts once the tint is composited: about 42 (Windows Quick
+    /// Settings) and 50 (Twinkle Tray).
     pub(crate) fn backdrop_luminosity(&self) -> (u8, u8, u8) {
-        let level = match (self.dark, self.material) {
-            (true, PopupMaterial::Acrylic) => match self.acrylic_brightness {
-                AcrylicBrightness::Normal => 66,
-                AcrylicBrightness::Bright => 100,
-                AcrylicBrightness::Brighter => 140,
-            },
-            (true, _) => 32,
-            (false, _) => 245,
+        let level = match (self.dark, self.material, self.backdrop_brightness) {
+            (false, _, _) => 245,
+            (true, _, BackdropBrightness::Normal) => 32,
+            (true, PopupMaterial::Mica, BackdropBrightness::Bright) => 52,
+            (true, PopupMaterial::Mica, BackdropBrightness::Brighter) => 60,
+            (true, _, BackdropBrightness::Bright) => 45,
+            (true, _, BackdropBrightness::Brighter) => 55,
         };
         (level, level, level)
     }
@@ -132,7 +136,7 @@ impl Palette {
         accent: crate::theme::AccentRamp,
         material: PopupMaterial,
         font_family: SharedString,
-        acrylic_brightness: AcrylicBrightness,
+        backdrop_brightness: BackdropBrightness,
     ) -> Self {
         let accent_fill = rgb8(accent.fill(dark));
         Self {
@@ -229,7 +233,7 @@ impl Palette {
                 rgb8((17, 17, 17))
             },
             material,
-            acrylic_brightness,
+            backdrop_brightness,
         }
     }
 }
