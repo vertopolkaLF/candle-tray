@@ -52,9 +52,9 @@ pub enum PopupMaterial {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackdropBrightness {
+    Darker,
     #[default]
     Normal,
-    Bright,
     Brighter,
 }
 

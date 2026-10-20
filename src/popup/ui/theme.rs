@@ -91,8 +91,8 @@ impl Palette {
                 }
                 let opacity = match (self.dark, level) {
                     (false, _) => 0.5,
-                    (true, BackdropBrightness::Normal) => 0.8,
-                    (true, BackdropBrightness::Bright) => 0.5,
+                    (true, BackdropBrightness::Darker) => 0.8,
+                    (true, BackdropBrightness::Normal) => 0.5,
                     (true, BackdropBrightness::Brighter) => 0.3,
                 };
                 return self.solid_background.opacity(opacity);
@@ -102,8 +102,8 @@ impl Palette {
         let opacity = if frosted {
             match (self.dark, level) {
                 (false, _) => 0.25,
-                (true, BackdropBrightness::Normal) => 0.35,
-                (true, BackdropBrightness::Bright) => 0.25,
+                (true, BackdropBrightness::Darker) => 0.35,
+                (true, BackdropBrightness::Normal) => 0.25,
                 (true, BackdropBrightness::Brighter) => 0.15,
             }
         } else if self.dark {
@@ -122,10 +122,10 @@ impl Palette {
     pub(crate) fn backdrop_luminosity(&self) -> (u8, u8, u8) {
         let level = match (self.dark, self.material, self.backdrop_brightness) {
             (false, _, _) => 245,
-            (true, _, BackdropBrightness::Normal) => 32,
-            (true, PopupMaterial::Mica, BackdropBrightness::Bright) => 52,
+            (true, _, BackdropBrightness::Darker) => 32,
+            (true, PopupMaterial::Mica, BackdropBrightness::Normal) => 52,
             (true, PopupMaterial::Mica, BackdropBrightness::Brighter) => 60,
-            (true, _, BackdropBrightness::Bright) => 45,
+            (true, _, BackdropBrightness::Normal) => 45,
             (true, _, BackdropBrightness::Brighter) => 55,
         };
         (level, level, level)

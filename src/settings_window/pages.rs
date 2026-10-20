@@ -73,13 +73,13 @@ impl SettingsWindow {
             .position(|icon| *icon == s.tray_icon)
             .unwrap_or(0);
         let brightness_labels = [
+            crate::i18n::tr("settings-backdrop-brightness-darker"),
             crate::i18n::tr("settings-backdrop-brightness-normal"),
-            crate::i18n::tr("settings-backdrop-brightness-bright"),
             crate::i18n::tr("settings-backdrop-brightness-brighter"),
         ];
         let brightness_index = match s.backdrop_brightness {
-            BackdropBrightness::Normal => 0,
-            BackdropBrightness::Bright => 1,
+            BackdropBrightness::Darker => 0,
+            BackdropBrightness::Normal => 1,
             BackdropBrightness::Brighter => 2,
         };
         let appearance = kit::card_of(k, |k| {
@@ -147,9 +147,9 @@ impl SettingsWindow {
                     s.popup_material == PopupMaterial::Solid,
                     Self::h(cx, |this, index: usize, _, cx| {
                         let brightness = match index {
-                            1 => BackdropBrightness::Bright,
+                            1 => BackdropBrightness::Normal,
                             2 => BackdropBrightness::Brighter,
-                            _ => BackdropBrightness::Normal,
+                            _ => BackdropBrightness::Darker,
                         };
                         this.edit(cx, move |settings| {
                             settings.backdrop_brightness = brightness

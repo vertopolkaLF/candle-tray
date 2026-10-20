@@ -71,6 +71,8 @@ pub fn open(model: Entity<AppModel>, cx: &mut App) {
     }) {
         Ok(handle) => {
             SETTINGS_WINDOW.with(|slot| *slot.borrow_mut() = Some(handle));
+            // An open popup stays up as a live preview while Settings is used.
+            crate::popup::set_pinned(true);
             let _ = handle.update(cx, |_, window, _| window.activate_window());
         }
         Err(error) => crate::logger::error(format!("could not open Settings: {error:#}")),
@@ -85,4 +87,5 @@ pub(crate) fn is_open() -> bool {
 /// Called by the window as it closes.
 pub(crate) fn window_closed() {
     SETTINGS_WINDOW.with(|slot| slot.borrow_mut().take());
+    crate::popup::set_pinned(false);
 }
