@@ -123,7 +123,7 @@ impl Palette {
             // ControlCornerRadius.
             control_radius: 4.0,
             // Quick Settings separates its flat sections by spacing alone.
-            card_gap: 16.0,
+            card_gap: 10.0,
             font_family,
             // TextFillColorPrimary/Secondary/Tertiary.
             text_primary: if dark {
