@@ -155,7 +155,6 @@ pub(crate) fn slider(spec: SliderSpec<'_>, fx: &mut fx::Fx) -> AnyElement {
         return element.opacity(0.6).into_any_element();
     }
     element = element
-        .cursor_pointer()
         .on_hover(move |hovered: &bool, window, cx| on_hover(*hovered, window, cx))
         .child(
             canvas(

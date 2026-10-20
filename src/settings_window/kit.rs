@@ -779,7 +779,6 @@ impl Row {
         if let Some(on_click) = on_click {
             let (hovered, t) = hoverable(k, row, hover_key);
             row = hovered
-                .cursor_pointer()
                 .on_click(move |_, window, cx| on_click((), window, cx))
                 .child(row_hover_fill(k, t));
         }
@@ -1129,7 +1128,6 @@ impl Button {
         } else {
             let pressed = skin.pressed;
             button = hover_bg(k, button, key, skin.rest, skin.hover)
-                .cursor_pointer()
                 .active(move |style| style.bg(pressed));
             if let Some(on_click) = self.on_click {
                 button = button.on_click(move |_: &ClickEvent, window, cx| {
@@ -1308,7 +1306,7 @@ pub(crate) fn toggle(
         .size_full(),
     );
     if !disabled {
-        el = el.cursor_pointer().on_click(move |_, window, cx| {
+        el = el.on_click(move |_, window, cx| {
             cx.stop_propagation();
             on_toggle(!on, window, cx)
         });
@@ -1428,7 +1426,7 @@ pub(crate) fn checkbox(
             ))
         });
     if !disabled {
-        el = el.cursor_pointer().on_click(move |_, window, cx| {
+        el = el.on_click(move |_, window, cx| {
             cx.stop_propagation();
             on_change(!checked, window, cx)
         });
@@ -1689,13 +1687,13 @@ fn menu_panel_with(
         // A closing menu only fades; it no longer reacts to the pointer.
         if !item.disabled && leaving.is_none() {
             let key = hover_key(&format!("menu-{id}-{index}"));
-            entry = hover_bg(k, entry, key, rest, if is_selected { rest } else { hover })
-                .cursor_pointer()
-                .on_click(move |_, window, cx| {
+            entry = hover_bg(k, entry, key, rest, if is_selected { rest } else { hover }).on_click(
+                move |_, window, cx| {
                     cx.stop_propagation();
                     menus.close(window);
                     on_select(index, window, cx);
-                });
+                },
+            );
             if let Some(on_hover) = extras.on_hover.clone() {
                 entry = entry
                     .on_hover(move |hovered, window, cx| on_hover((index, *hovered), window, cx));
@@ -1849,7 +1847,6 @@ pub(crate) fn dropdown_with_placeholder(
     if !disabled {
         let key = hover_key(&format!("dropdown-{id}"));
         button = hover_bg(k, button, key, rest, hover)
-            .cursor_pointer()
             .on_click(move |_, window, _| menus.toggle(toggle_id.clone(), window));
     }
     let items = options.into_iter().map(MenuItem::new).collect::<Vec<_>>();
@@ -1989,7 +1986,6 @@ impl SearchDropdown {
                 .child(
                     div()
                         .id(eid(close_id))
-                        .cursor_pointer()
                         .on_click(move |_, window, _| menus.close(window))
                         .child(caret),
                 )
@@ -2027,7 +2023,6 @@ impl SearchDropdown {
                 theme.control,
                 hover,
             )
-            .cursor_pointer()
             .on_click(move |_, window, cx| {
                 menus.toggle(toggle_id.clone(), window);
                 on_open((), window, cx);
@@ -2206,7 +2201,6 @@ pub(crate) fn slider(
         .w(px(width))
         .h(px(CONTROL_HEIGHT))
         .flex_none()
-        .cursor_pointer()
         .child(
             div()
                 .absolute()
@@ -2764,7 +2758,6 @@ pub(crate) fn stepper(
             .when(active, |el| el.shadow(card_shadow(theme)))
             .when(reachable, |el| {
                 hover_bg(k, el, hover_key(&step_id), rest, theme.subtle_hover)
-                    .cursor_pointer()
                     .on_click(move |_, window, cx| on_select(index, window, cx))
             })
             .child(marker)
@@ -2880,7 +2873,6 @@ impl ChoiceCard {
                 theme.control_hover
             };
             card = hover_bg(k, card, key, rest, hover)
-                .cursor_pointer()
                 .on_click(move |event, window, cx| on_click(event.click_count() > 1, window, cx));
         }
         card
@@ -3025,7 +3017,6 @@ fn drag_area(
         .w(px(width))
         .h(px(height))
         .flex_none()
-        .cursor_pointer()
         .children(content)
         .child(
             canvas(
@@ -3214,7 +3205,6 @@ pub(crate) fn icon_choices(
         .rounded(px(CONTROL_RADIUS))
         .border_1()
         .border_color(stroke)
-        .cursor_pointer()
         .on_click(move |_, window, cx| on_select(index, window, cx))
         .child(icon(glyph, 20.0, ink));
         row = row.child(with_tooltip(k, tile, label));
@@ -3349,7 +3339,6 @@ fn swatch_shell(k: &Kit, id: &str, selected: Option<Hsla>) -> gpui::Stateful<gpu
         .size(px(34.0))
         .rounded_full()
         .p(px(4.0))
-        .cursor_pointer()
 }
 
 fn swatch_dot() -> gpui::Div {

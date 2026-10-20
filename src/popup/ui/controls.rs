@@ -178,11 +178,7 @@ fn segmented_track_optional(
             .items_center()
             .justify_center()
             .px(px(10.0));
-        cell = if segment.disabled || Some(index) == selected {
-            wire(index, cell)
-        } else {
-            wire(index, cell.cursor_pointer())
-        };
+        cell = wire(index, cell);
         // flex_none() leaves flex_basis unchanged in GPUI. Applying
         // flex_1() first would retain a zero basis and collapse fixed
         // cells to their padding while the thumb keeps its full width.

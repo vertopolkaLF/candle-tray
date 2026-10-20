@@ -263,7 +263,6 @@ impl SettingsWindow {
                     .h(px(NAV_ITEM_HEIGHT))
                     .px(px(14.0))
                     .rounded(px(kit::CONTROL_RADIUS))
-                    .cursor_pointer()
                     .on_click(move |_, window, cx| on_click((), window, cx))
                     .child(icon(tab.icon(), 18.0, k.theme.text_secondary))
                     .child(

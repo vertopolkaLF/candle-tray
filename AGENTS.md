@@ -16,6 +16,7 @@ Rust + GPUI rewrite of Twinkle Tray (monitor brightness from the Windows tray). 
 
 - Read the vendored `gpui` sources and examples before UI work; LLM knowledge of GPUI is weak.
 - Every setting applies live; no restart is ever required.
+- Never use the pointing-hand cursor (`cursor_pointer`); clickable controls keep the arrow, as in Windows.
 - Hardware I/O never runs on the UI thread (see `src/monitors`).
 - Levels crossing `monitors::` are hardware percent; slider ↔ hardware mapping lives in `src/levels.rs`.
 - Code, comments and commit messages in English.
