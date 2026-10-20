@@ -229,6 +229,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
             events::turn_off();
         }
         for reason in events::Events::pump() {
+            log(format!("Hardware event: {reason:?}"));
             let reason = if debounce
                 .as_ref()
                 .is_some_and(|(_, r)| *r == SnapshotReason::Resumed)
@@ -279,6 +280,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                     }
                 }
                 Ok(Command::TurnOff(mode)) => {
+                    log(format!("Turning displays off ({mode:?})"));
                     if mode == TurnOffMode::Windows {
                         events::turn_off();
                     }

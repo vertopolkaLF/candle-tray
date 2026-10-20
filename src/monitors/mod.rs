@@ -36,7 +36,7 @@ mod service;
 #[cfg(windows)]
 mod wmi;
 fn log(message: impl std::fmt::Display) {
-    eprintln!("[monitors] {message}");
+    crate::logger::info(format!("[monitors] {message}"));
 }
 
 /// Stable per-display key (device path instance, legacy `hwid[2]`).
