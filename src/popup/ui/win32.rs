@@ -13,7 +13,8 @@ use windows_sys::Win32::{
     Graphics::{
         Dwm::{
             DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_NCRENDERING_POLICY,
-            DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute,
+            DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE, DwmFlush,
+            DwmSetWindowAttribute,
         },
         Gdi::{
             CreateRectRgn, CreateRoundRectRgn, GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST,
@@ -328,6 +329,16 @@ pub(crate) fn show(hwnd: HWND) {
             0,
             SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
         );
+    }
+}
+
+/// Block until DWM has composed the frames presented so far. A window that
+/// was hidden reaches the screen on DWM's schedule, not ours: its first
+/// composition (backdrop effect, cold caches after idle) can take longer
+/// than the whole open slide.
+pub(crate) fn wait_for_composition() {
+    unsafe {
+        DwmFlush();
     }
 }
 

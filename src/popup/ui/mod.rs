@@ -258,6 +258,12 @@ fn handle_command(
                 });
                 if plan.first_show {
                     win32::show(plan.hwnd);
+                    if animations_enabled() {
+                        // Hold the UI thread until the first frame is really
+                        // on screen. The slide counts this wait as a hitch,
+                        // so the entrance plays instead of finishing unseen.
+                        win32::wait_for_composition();
+                    }
                 }
                 if !animations_enabled() {
                     win32::activate(plan.hwnd);
