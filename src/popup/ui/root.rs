@@ -1201,7 +1201,7 @@ impl PopupRoot {
         );
         let slider = self.slider_row(
             "all-displays".into(),
-            "fluent-sun-low",
+            "fluent-sun",
             value,
             true,
             on_change,
@@ -1271,7 +1271,7 @@ impl PopupRoot {
             });
             card = card.child(self.slider_row(
                 format!("brightness-{}", row.monitor.id),
-                "fluent-sun-low",
+                "fluent-sun",
                 value,
                 enabled,
                 on_change,
