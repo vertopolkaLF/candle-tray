@@ -61,9 +61,9 @@ fn run() -> Result<()> {
     let model_service = Arc::clone(&service);
     popup::ui::start(move |cx| {
         let model = cx.new(|_| AppModel::new(settings, model_service, persist));
-        // Keep the tray tooltip on the current average level.
+        // Keep the tray tooltip on the primary display's level.
         cx.observe(&model, |model, cx| {
-            candle_tray::tray::set_tooltip_level(model.read(cx).average_level());
+            candle_tray::tray::set_tooltip_level(model.read(cx).primary_level());
         })
         .detach();
         if let Some(pending) = import_offer {

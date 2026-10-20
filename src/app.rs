@@ -199,14 +199,12 @@ impl AppModel {
         rows
     }
 
-    /// Average slider level of the visible controllable displays.
-    pub fn average_level(&self) -> Option<u8> {
-        let levels: Vec<u32> = self
-            .rows()
-            .iter()
-            .filter_map(|row| row.slider.map(u32::from))
-            .collect();
-        (!levels.is_empty()).then(|| (levels.iter().sum::<u32>() / levels.len() as u32) as u8)
+    /// Slider level of the primary display (the one at the desktop origin).
+    pub fn primary_level(&self) -> Option<u8> {
+        self.all_rows()
+            .into_iter()
+            .find(|row| row.monitor.bounds.is_some_and(|b| b.x == 0 && b.y == 0))
+            .and_then(|row| row.slider)
     }
 
     // ----- actions -----------------------------------------------------------

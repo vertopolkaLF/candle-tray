@@ -18,7 +18,7 @@ use crate::popup::{self, PopupCommand};
 
 static MENU_DIRTY: AtomicBool = AtomicBool::new(false);
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
-/// Average brightness for the tooltip; 255 = unknown.
+/// Primary display brightness for the tooltip; 255 = unknown.
 static TOOLTIP_LEVEL: AtomicU8 = AtomicU8::new(255);
 /// Win32 id of the thread running [`run`]; 0 before it starts.
 static TRAY_THREAD: AtomicU32 = AtomicU32::new(0);
@@ -29,7 +29,7 @@ pub fn refresh_menu() {
     wake();
 }
 
-/// Publish the average brightness shown in the tooltip.
+/// Publish the primary display brightness shown in the tooltip.
 pub fn set_tooltip_level(level: Option<u8>) {
     TOOLTIP_LEVEL.store(level.unwrap_or(255), Ordering::SeqCst);
     wake();
