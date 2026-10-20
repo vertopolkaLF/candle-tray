@@ -1,0 +1,141 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Read version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $match = Select-String -LiteralPath Cargo.toml -Pattern '^\s*version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1
+          if (-not $match) {
+            throw "Could not read package version from Cargo.toml"
+          }
+          $version = $match.Matches[0].Groups[1].Value
+          $tag = "v$version"
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne $tag) {
+            throw "Git tag '$($env:GITHUB_REF_NAME)' does not match Cargo.toml version '$tag'."
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "version $version"
+
+
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 90
+    strategy:
+      # A release needs every architecture, so stop the others on first failure.
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Per-arch caches; jobs run in parallel and build disjoint targets.
+          key: ${{ matrix.arch }}
+          cache-on-failure: true
+
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
+      - name: Build portable zip and NSIS installer
+        shell: pwsh
+        run: .\build.ps1 -Arch ${{ matrix.arch }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-${{ matrix.arch }}
+          path: dist/${{ needs.version.outputs.version }}/*
+          if-no-files-found: error
+
+  release:
+    name: Draft GitHub release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: build-*
+          merge-multiple: true
+          path: dist/${{ needs.version.outputs.version }}
+
+      - name: Upload combined artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: candle-tray-${{ needs.version.outputs.version }}
+          path: dist/${{ needs.version.outputs.version }}/*
+          if-no-files-found: error
+
+      - name: Create draft GitHub release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $version = $env:VERSION
+          $tag = "v$version"
+          $assetDir = Join-Path "dist" $version
+          $assets = @(Get-ChildItem -LiteralPath $assetDir -File | ForEach-Object { $_.FullName })
+          if ($assets.Count -ne 4) {
+            throw "Expected four release assets in $assetDir"
+          }
+          Write-Host "Assets:"
+          $assets | ForEach-Object { Write-Host "  $_" }
+
+          $existing = gh release view $tag --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0 -and $existing) {
+            $release = $existing | ConvertFrom-Json
+            if (-not $release.isDraft) {
+              throw "Release $tag already exists and is published. Refusing to overwrite."
+            }
+            Write-Host "Updating draft $tag"
+            gh release upload $tag @assets --clobber
+            if ($LASTEXITCODE -ne 0) {
+              throw "gh release upload failed with exit code $LASTEXITCODE"
+            }
+          } else {
+            Write-Host "Creating draft $tag"
+            gh release create $tag @assets --draft --title "Candle Tray $version" --generate-notes --target $env:GITHUB_SHA
+            if ($LASTEXITCODE -ne 0) {
+              throw "gh release create failed with exit code $LASTEXITCODE"
+            }
+          }
