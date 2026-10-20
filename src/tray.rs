@@ -192,11 +192,20 @@ fn make_menu() -> Result<Menu> {
 
 const ICON_SIZE: u32 = 32;
 
-/// A Fluent glyph, black on a light taskbar and white on a dark one like the
-/// system icons next to it. The 16 px sources stay pixel-aligned at 100% and
-/// 200% scale.
-fn tray_icon_image(glyph: TrayIcon, light_taskbar: bool) -> Result<Icon> {
-    let svg = match glyph {
+/// Asset name of a tray glyph, so Settings can preview it.
+pub(crate) fn glyph_asset(glyph: TrayIcon) -> &'static str {
+    match glyph {
+        TrayIcon::Fire => "tray-fire",
+        TrayIcon::Sun => "tray-sun",
+        TrayIcon::BrightnessHigh => "tray-brightness-high",
+        TrayIcon::BrightnessLow => "tray-brightness-low",
+        TrayIcon::Lightbulb => "tray-lightbulb",
+    }
+}
+
+/// The 16 px Fluent source; it stays pixel-aligned at 100% and 200% scale.
+pub(crate) fn glyph_svg(glyph: TrayIcon) -> &'static str {
+    match glyph {
         TrayIcon::Fire => include_str!("../assets/tray/fluent-fire-16-regular.svg"),
         TrayIcon::Sun => include_str!("../assets/tray/fluent-weather-sunny-16-regular.svg"),
         TrayIcon::BrightnessHigh => {
@@ -206,9 +215,14 @@ fn tray_icon_image(glyph: TrayIcon, light_taskbar: bool) -> Result<Icon> {
             include_str!("../assets/tray/fluent-brightness-low-16-regular.svg")
         }
         TrayIcon::Lightbulb => include_str!("../assets/tray/fluent-lightbulb-16-regular.svg"),
-    };
+    }
+}
+
+/// A Fluent glyph, black on a light taskbar and white on a dark one like the
+/// system icons next to it.
+fn tray_icon_image(glyph: TrayIcon, light_taskbar: bool) -> Result<Icon> {
     let color = if light_taskbar { "#000000" } else { "#FFFFFF" };
-    let svg = svg.replace("currentColor", color);
+    let svg = glyph_svg(glyph).replace("currentColor", color);
     let pixels = rasterize(&svg, ICON_SIZE)?;
     Icon::from_rgba(pixels, ICON_SIZE, ICON_SIZE).context("create RGBA tray icon")
 }

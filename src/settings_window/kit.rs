@@ -3176,6 +3176,52 @@ pub(crate) fn hue_strip(
     )
 }
 
+/// A row of square glyph tiles; the chosen one is filled with the accent.
+pub(crate) fn icon_choices(
+    k: &Kit,
+    id: &str,
+    choices: Vec<(&'static str, SharedString)>,
+    selected: usize,
+    on_select: Handler<usize>,
+) -> AnyElement {
+    let theme = &k.theme;
+    let mut row = div().flex().flex_row().flex_wrap().gap(px(6.0));
+    for (index, (glyph, label)) in choices.into_iter().enumerate() {
+        let chosen = index == selected;
+        let tile_id = format!("{id}-{index}");
+        let (rest, hover, ink, stroke) = if chosen {
+            (
+                theme.accent,
+                theme.accent_hover,
+                theme.on_accent,
+                theme.accent,
+            )
+        } else {
+            (theme.button, theme.button_hover, theme.text, theme.divider)
+        };
+        let on_select = on_select.clone();
+        let tile = hover_bg(
+            k,
+            div().id(eid(tile_id.clone())),
+            hover_key(&tile_id),
+            rest,
+            hover,
+        )
+        .size(px(40.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(CONTROL_RADIUS))
+        .border_1()
+        .border_color(stroke)
+        .cursor_pointer()
+        .on_click(move |_, window, cx| on_select(index, window, cx))
+        .child(icon(glyph, 20.0, ink));
+        row = row.child(with_tooltip(k, tile, label));
+    }
+    row.into_any_element()
+}
+
 /// One preset in a [`ColorSwatches`] row.
 pub(crate) struct Swatch {
     pub label: SharedString,

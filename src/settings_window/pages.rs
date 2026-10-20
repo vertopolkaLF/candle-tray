@@ -55,22 +55,23 @@ impl SettingsWindow {
             PopupMaterial::Mica => 1,
             PopupMaterial::Solid => 2,
         };
-        let tray_icon_labels: Vec<SharedString> = TrayIcon::ALL
+        let tray_icon_choices: Vec<(&'static str, SharedString)> = TrayIcon::ALL
             .iter()
             .map(|icon| {
-                tr(match icon {
+                let label = tr(match icon {
                     TrayIcon::Fire => "settings-tray-icon-fire",
                     TrayIcon::Sun => "settings-tray-icon-sun",
                     TrayIcon::BrightnessHigh => "settings-tray-icon-brightness-high",
                     TrayIcon::BrightnessLow => "settings-tray-icon-brightness-low",
                     TrayIcon::Lightbulb => "settings-tray-icon-lightbulb",
-                })
+                });
+                (crate::tray::glyph_asset(*icon), label)
             })
             .collect();
         let tray_icon_index = TrayIcon::ALL
             .iter()
             .position(|icon| *icon == s.tray_icon)
-            .unwrap_or(0) as i32;
+            .unwrap_or(0);
         let appearance = kit::card_of(k, |k| {
             vec![
                 kit::dropdown_row(
@@ -126,19 +127,18 @@ impl SettingsWindow {
                         this.edit(cx, move |settings| settings.popup_material = material);
                     }),
                 ),
-                kit::dropdown_row(
-                    k,
-                    "general-tray-icon",
-                    tr("settings-tray-icon"),
-                    None,
-                    tray_icon_labels,
-                    tray_icon_index,
-                    false,
-                    Self::h(cx, |this, index: usize, _, cx| {
-                        let icon = TrayIcon::ALL.get(index).copied().unwrap_or_default();
-                        this.edit(cx, move |settings| settings.tray_icon = icon);
-                    }),
-                ),
+                Row::new("row-general-tray-icon", tr("settings-tray-icon"))
+                    .trailing(kit::icon_choices(
+                        k,
+                        "general-tray-icon",
+                        tray_icon_choices,
+                        tray_icon_index,
+                        Self::h(cx, |this, index: usize, _, cx| {
+                            let icon = TrayIcon::ALL.get(index).copied().unwrap_or_default();
+                            this.edit(cx, move |settings| settings.tray_icon = icon);
+                        }),
+                    ))
+                    .render(k),
             ]
         });
 

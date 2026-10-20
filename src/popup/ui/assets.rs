@@ -67,7 +67,12 @@ fn source(name: &str) -> Option<&'static str> {
         "dots-six-vertical-bold" => {
             include_str!("../../../assets/icons/ph-dots-six-vertical-bold.svg")
         }
-        _ => return None,
+        _ => {
+            return crate::settings::TrayIcon::ALL
+                .into_iter()
+                .find(|glyph| crate::tray::glyph_asset(*glyph) == name)
+                .map(crate::tray::glyph_svg);
+        }
     })
 }
 
