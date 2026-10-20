@@ -25,7 +25,7 @@ use super::{
     theme::{self, HslaExt, Palette},
 };
 use crate::app::{AppModel, MonitorRow};
-use crate::monitors::BrightnessBackend;
+use crate::monitors::{BrightnessBackend, MonitorKind};
 
 /// Fluent motion tokens used by Windows edge panels.
 const OPEN_ANIMATION: Duration = Duration::from_millis(250);
@@ -42,7 +42,7 @@ const PREWARM_FRAMES: u32 = 3;
 const PREWARM_EXPOSED_FRAMES: u32 = 6;
 /// Small inner inset keeps content clear of the capsule stroke.
 const CHROME_INSET: f32 = 1.0;
-const PAGE_PADDING: f32 = 16.0;
+const PAGE_PADDING: f32 = 12.0;
 const FOOTER_HEIGHT: f32 = 48.0;
 const BUTTON: f32 = 36.0;
 const GLYPH: f32 = 18.0;
@@ -1060,13 +1060,9 @@ impl PopupRoot {
             .border_color(self.palette.card_stroke)
     }
 
-    /// A flat Quick Settings-style section: no fill or stroke, only spacing.
-    fn group(&self) -> gpui::Div {
-        div().flex().flex_col().px(px(8.0))
-    }
-
     fn card_header(
         &self,
+        icon_name: &str,
         title: String,
         trailing: Option<String>,
         caption: Option<(String, gpui::Hsla)>,
@@ -1096,7 +1092,7 @@ impl PopupRoot {
             .flex_row()
             .items_center()
             .gap(px(10.0))
-            .min_h(px(32.0))
+            .child(icon(icon_name, 18.0, palette.text_secondary))
             .child(text);
         if let Some(trailing) = trailing {
             header = header.child(
@@ -1141,16 +1137,8 @@ impl PopupRoot {
             .flex()
             .flex_row()
             .items_center()
-            .h(px(40.0))
-            .gap(px(12.0))
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(24.0))
-                    .flex()
-                    .justify_center()
-                    .child(icon(leading_icon, 20.0, palette.text_primary)),
-            )
+            .gap(px(8.0))
+            .child(icon(leading_icon, 18.0, palette.text_secondary))
             .child(div().flex_1().min_w_0().child(slider))
             .child(
                 // Fixed width keeps the track still while the digits change.
@@ -1179,6 +1167,7 @@ impl PopupRoot {
             model.update(cx, |model, cx| model.set_all(value, cx));
         });
         let header = self.card_header(
+            "fluent-link",
             crate::i18n::tr("popup-all-displays").to_owned(),
             None,
             Some((names, self.palette.text_secondary)),
@@ -1206,7 +1195,7 @@ impl PopupRoot {
                 cx,
             )
         });
-        self.group()
+        self.card()
             .child(header)
             .child(slider)
             .children(contrast)
@@ -1221,6 +1210,10 @@ impl PopupRoot {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let palette = self.palette.clone();
+        let icon_name = match row.monitor.kind {
+            MonitorKind::Internal => "fluent-laptop",
+            MonitorKind::External => "fluent-desktop",
+        };
         let unresponsive = row.monitor.unresponsive;
         let off = row.monitor.powered_off;
         // Off shows in the trailing slot: a caption line would grow the card.
@@ -1243,9 +1236,9 @@ impl PopupRoot {
         let power = matches!(row.monitor.backend, BrightnessBackend::Ddc { .. })
             .then(|| self.power_button(&row.monitor.id, off, cx));
         let enabled = !unresponsive && !off;
-        let header = self.card_header(row.name.clone(), trailing, caption, power);
+        let header = self.card_header(icon_name, row.name.clone(), trailing, caption, power);
         let mut card = self
-            .group()
+            .card()
             .when(unresponsive, |card| card.opacity(0.7))
             .child(header);
         if !sdr_only && let Some(value) = row.slider {
@@ -1352,8 +1345,15 @@ impl PopupRoot {
             .gap(px(2.0))
             .border_color(palette.card_stroke)
             .bg(palette.footer_background)
-            // Like the Quick Settings footer, actions sit at the trailing edge.
-            .child(div().flex_1())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(12.0))
+                    .text_color(palette.text_secondary)
+                    .truncate()
+                    .child(SharedString::from(crate::i18n::tr("app-name").to_owned())),
+            )
             .children(link)
             .child(settings);
         // By a top taskbar the bar caps the capsule instead of closing it.
