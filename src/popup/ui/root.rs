@@ -42,9 +42,7 @@ const PREWARM_FRAMES: u32 = 3;
 const PREWARM_EXPOSED_FRAMES: u32 = 6;
 /// Small inner inset keeps content clear of the capsule stroke.
 const CHROME_INSET: f32 = 1.0;
-const PAGE_PADDING: f32 = 12.0;
-/// Leading glyph column plus its gap; titles align with the slider start.
-const SLIDER_INSET: f32 = 34.0;
+const PAGE_PADDING: f32 = 16.0;
 const FOOTER_HEIGHT: f32 = 48.0;
 const BUTTON: f32 = 36.0;
 const GLYPH: f32 = 18.0;
@@ -1079,7 +1077,7 @@ impl PopupRoot {
             div()
                 .text_size(px(14.0))
                 .line_height(px(20.0))
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(FontWeight::SEMIBOLD)
                 .truncate()
                 .child(SharedString::from(title)),
         );
@@ -1098,8 +1096,7 @@ impl PopupRoot {
             .flex_row()
             .items_center()
             .gap(px(10.0))
-            .min_h(px(28.0))
-            .pl(px(SLIDER_INSET))
+            .min_h(px(32.0))
             .child(text);
         if let Some(trailing) = trailing {
             header = header.child(
@@ -1144,15 +1141,15 @@ impl PopupRoot {
             .flex()
             .flex_row()
             .items_center()
-            .h(px(34.0))
-            .gap(px(10.0))
+            .h(px(40.0))
+            .gap(px(12.0))
             .child(
                 div()
                     .flex_none()
-                    .w(px(SLIDER_INSET - 10.0))
+                    .w(px(24.0))
                     .flex()
                     .justify_center()
-                    .child(icon(leading_icon, 18.0, palette.text_secondary)),
+                    .child(icon(leading_icon, 20.0, palette.text_primary)),
             )
             .child(div().flex_1().min_w_0().child(slider))
             .child(
