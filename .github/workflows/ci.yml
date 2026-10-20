@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Format, lint and test run as parallel jobs: a formatting slip must not hide
+# lint or test results behind it.
+env:
+  # Large git dep (windows-rs); CLI fetch is less likely to sit silent for minutes.
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+  # Full debuginfo makes Windows codegen/linking slow and bloats the cache;
+  # line tables still give file:line in test panics.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  # Vendored gpui is a path dependency, so its mtime-based fingerprint is
+  # stale after every checkout and it always rebuilds. Cargo.toml builds it
+  # at opt-level 3 for local animation smoothness; CI only needs it to compile.
+  CI_CARGO_CONFIG: profile.dev.package.gpui.opt-level=0
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --package candle-tray --check
+
+  lint:
+    name: Lint
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Previous runs failed and skipped cache, so every CI recloned windows-rs.
+          cache-on-failure: true
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+      - name: Lint
+        run: cargo clippy --config "$env:CI_CARGO_CONFIG" --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: Test
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+      - name: Test
+        run: cargo test --config "$env:CI_CARGO_CONFIG" --all-targets --all-features --locked
