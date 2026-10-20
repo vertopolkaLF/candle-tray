@@ -1163,7 +1163,7 @@ impl PopupRoot {
             .flex_row()
             .items_center()
             .gap(px(8.0))
-            .child(icon(leading_icon, 18.0, palette.text_secondary))
+            .child(icon(leading_icon, 18.0, palette.text_primary))
             .child(div().flex_1().min_w_0().child(slider))
             .child(
                 // Fixed width keeps the track still while the digits change;
@@ -1174,7 +1174,6 @@ impl PopupRoot {
                     .flex()
                     .justify_center()
                     .text_size(px(14.0))
-                    .text_color(palette.text_secondary)
                     .child(SharedString::from(value.to_string())),
             )
             .into_any_element()
