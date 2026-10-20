@@ -1,5 +1,6 @@
 pub mod app;
 pub mod autostart;
+pub mod hotkey;
 pub mod i18n;
 pub mod idle;
 pub mod levels;

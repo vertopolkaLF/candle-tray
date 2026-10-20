@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, Render, ScrollHandle, ScrollWheelEvent, SharedString,
+    KeyDownEvent, ParentElement, Render, ScrollHandle, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Window, WindowControlArea, div, point, px,
 };
 
@@ -26,15 +26,17 @@ const SCROLL_GLIDE: Duration = Duration::from_millis(140);
 pub(super) enum Tab {
     General,
     Monitors,
+    Profiles,
 }
 
 impl Tab {
-    const ALL: [Tab; 2] = [Tab::General, Tab::Monitors];
+    const ALL: [Tab; 3] = [Tab::General, Tab::Monitors, Tab::Profiles];
 
     fn label(self) -> String {
         match self {
             Tab::General => crate::i18n::tr("settings-general"),
             Tab::Monitors => crate::i18n::tr("settings-monitors"),
+            Tab::Profiles => crate::i18n::tr("settings-profiles"),
         }
     }
 
@@ -42,6 +44,7 @@ impl Tab {
         match self {
             Tab::General => "gear-six-fill",
             Tab::Monitors => "monitor-fill",
+            Tab::Profiles => "sliders-horizontal-fill",
         }
     }
 
@@ -49,6 +52,7 @@ impl Tab {
         match self {
             Tab::General => "general",
             Tab::Monitors => "monitors",
+            Tab::Profiles => "profiles",
         }
     }
 }
@@ -68,6 +72,10 @@ pub(crate) struct SettingsWindow {
     /// A short confirmation shown at the bottom of the page.
     pub(super) notice: Option<(SharedString, u64)>,
     notice_generation: u64,
+    /// Profile whose shortcut button is waiting for a key combination.
+    pub(super) hotkey_recording: Option<usize>,
+    /// The last combination pressed while recording had no modifier.
+    pub(super) hotkey_rejected: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -99,6 +107,7 @@ impl SettingsWindow {
             cx.observe(&model, |_, _, cx| cx.notify()),
             // The window's renderer is gone now; return its memory once idle.
             cx.on_release(|_, cx| {
+                crate::hotkey::set_suspended(false);
                 super::window_closed();
                 crate::idle::enter_soon(cx);
             }),
@@ -122,6 +131,8 @@ impl SettingsWindow {
             inputs: Inputs::default(),
             notice: None,
             notice_generation: 0,
+            hotkey_recording: None,
+            hotkey_rejected: false,
             _subscriptions: subscriptions,
         }
     }
@@ -191,6 +202,7 @@ impl SettingsWindow {
         if tab == self.tab {
             return;
         }
+        self.stop_hotkey_recording();
         let from = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
         let to = Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0);
         self.nav_slide = if to > from { 1.0 } else { -1.0 };
@@ -198,6 +210,17 @@ impl SettingsWindow {
         self.scroll.set_offset(point(px(0.0), px(0.0)));
         self.scroll_glide = None;
         cx.notify();
+    }
+
+    /// Move keyboard focus off any text field onto the page.
+    pub(super) fn focus_page(&self, window: &mut Window) {
+        window.focus(&self.focus);
+    }
+
+    fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.record_hotkey(event, cx) {
+            cx.stop_propagation();
+        }
     }
 
     // ----- shell ------------------------------------------------------------
@@ -350,6 +373,7 @@ impl SettingsWindow {
         rows.extend(match self.tab {
             Tab::General => self.general_page(k, window, cx),
             Tab::Monitors => self.monitors_page(k, window, cx),
+            Tab::Profiles => self.profiles_page(k, window, cx),
         });
         let body = div()
             .flex()
@@ -455,6 +479,7 @@ impl Render for SettingsWindow {
                 div()
                     .id("settings-body")
                     .track_focus(&self.focus)
+                    .on_key_down(cx.listener(Self::on_key_down))
                     .flex()
                     .flex_1()
                     .min_h_0()

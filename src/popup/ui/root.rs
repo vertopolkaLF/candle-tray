@@ -19,14 +19,14 @@ use gpui::{
 };
 
 use super::{
-    assets::{icon_path, template_glyph},
+    assets::{icon_path, profile_glyph},
     fx::{self, Fx, Spring},
     slider::{self, DragState, SliderSpec},
     theme::{self, HslaExt, Palette},
 };
 use crate::app::{AppModel, MonitorRow};
 use crate::monitors::BrightnessBackend;
-use crate::settings::TemplateIcon;
+use crate::settings::ProfileIcon;
 
 /// Fluent motion tokens used by Windows edge panels.
 const OPEN_ANIMATION: Duration = Duration::from_millis(250);
@@ -50,15 +50,15 @@ const GLYPH: f32 = 18.0;
 /// Baseline height before the first content measurement.
 const INITIAL_HEIGHT: f32 = 160.0;
 const SCROLL_GLIDE: Duration = Duration::from_millis(140);
-/// Template glyph picker: two rows of tiles, a divider and the delete row.
-const TEMPLATE_MENU_COLUMNS: usize = 6;
-const TEMPLATE_MENU_PADDING: f32 = 4.0;
-const TEMPLATE_MENU_GAP: f32 = 4.0;
-const TEMPLATE_MENU_INSET: f32 = 6.0;
+/// Profile glyph picker: two rows of tiles, a divider and the delete row.
+const PROFILE_MENU_COLUMNS: usize = 6;
+const PROFILE_MENU_PADDING: f32 = 4.0;
+const PROFILE_MENU_GAP: f32 = 4.0;
+const PROFILE_MENU_INSET: f32 = 6.0;
 /// Padding, border, two tile rows with their gap, the divider and the
 /// delete row with the gaps around the divider.
-const TEMPLATE_MENU_HEIGHT: f32 =
-    TEMPLATE_MENU_PADDING * 2.0 + 2.0 + BUTTON * 3.0 + 2.0 + 1.0 + TEMPLATE_MENU_GAP * 2.0;
+const PROFILE_MENU_HEIGHT: f32 =
+    PROFILE_MENU_PADDING * 2.0 + 2.0 + BUTTON * 3.0 + 2.0 + 1.0 + PROFILE_MENU_GAP * 2.0;
 
 /// Round the independent MaxContent measurement once to physical pixels.
 fn measured_page_height(height: f32, scale: f32) -> f32 {
@@ -163,10 +163,10 @@ pub(crate) struct PopupRoot {
     drag: DragState,
     capsule_origin: Point<gpui::Pixels>,
     capsule_size: (f32, f32),
-    /// Template whose glyph picker is open.
-    template_menu: Option<usize>,
-    /// Template being dragged to a new place in the bar.
-    template_drag: Option<TemplateDragState>,
+    /// Profile whose glyph picker is open.
+    profile_menu: Option<usize>,
+    /// Profile being dragged to a new place in the bar.
+    profile_drag: Option<ProfileDragState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -204,8 +204,8 @@ impl PopupRoot {
             drag: Rc::new(RefCell::new(None)),
             capsule_origin: Point::default(),
             capsule_size: (0.0, 0.0),
-            template_menu: None,
-            template_drag: None,
+            profile_menu: None,
+            profile_drag: None,
             _subscriptions: vec![appearance, observe],
         }
     }
@@ -386,8 +386,8 @@ impl PopupRoot {
             backdrop.hide();
         }
         self.host.offset = 0.0;
-        self.template_menu = None;
-        self.template_drag = None;
+        self.profile_menu = None;
+        self.profile_drag = None;
         self.hover.clear();
         *self.drag.borrow_mut() = None;
         self.fx = Fx::default();
@@ -426,8 +426,8 @@ impl PopupRoot {
             .filter(|height| *height > 1.0)
             .unwrap_or(INITIAL_HEIGHT - chrome);
         // The open glyph picker never hangs past the capsule's far edge.
-        if self.template_menu.is_some() {
-            content = content.max(TEMPLATE_MENU_HEIGHT + TEMPLATE_MENU_INSET * 2.0);
+        if self.profile_menu.is_some() {
+            content = content.max(PROFILE_MENU_HEIGHT + PROFILE_MENU_INSET * 2.0);
         }
         (content + chrome).clamp(80.0, self.host.max_height())
     }
@@ -702,26 +702,26 @@ fn icon(name: &str, size: f32, color: gpui::Hsla) -> gpui::Svg {
         .text_color(color)
 }
 
-/// Drag payload: the index of the dragged template.
-struct TemplateDrag(usize);
+/// Drag payload: the index of the dragged profile.
+struct ProfileDrag(usize);
 
 #[derive(Clone, Copy)]
-struct TemplateDragState {
+struct ProfileDragState {
     from: usize,
-    /// Slot the template would land in if dropped now.
+    /// Slot the profile would land in if dropped now.
     slot: usize,
 }
 
-/// The template glyph following the pointer while it is dragged.
+/// The profile glyph following the pointer while it is dragged.
 #[derive(Clone)]
-struct TemplateDragPreview {
+struct ProfileDragPreview {
     glyph: &'static str,
     color: gpui::Hsla,
     fill: gpui::Hsla,
     stroke: gpui::Hsla,
 }
 
-impl Render for TemplateDragPreview {
+impl Render for ProfileDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .size(px(BUTTON))
@@ -823,11 +823,11 @@ impl Render for PopupRoot {
             .is_some_and(|backdrop| backdrop.supports(palette.material));
         #[cfg(not(windows))]
         let frosted = false;
-        let template_menu = self
-            .template_menu
-            .filter(|index| *index < self.model.read(cx).settings.templates.len());
-        self.template_menu = template_menu;
-        let template_menu = template_menu.map(|index| self.render_template_menu(index, cx));
+        let profile_menu = self
+            .profile_menu
+            .filter(|index| *index < self.model.read(cx).settings.profiles.len());
+        self.profile_menu = profile_menu;
+        let profile_menu = profile_menu.map(|index| self.render_profile_menu(index, cx));
         let capsule = div()
             .id("popup-capsule")
             .absolute()
@@ -867,7 +867,7 @@ impl Render for PopupRoot {
                         theme::rgba8(0, 0, 0, 0x12)
                     }),
             )
-            .children(template_menu.into_iter().flatten());
+            .children(profile_menu.into_iter().flatten());
 
         if self.host.phase == Phase::Prewarm {
             self.host.prewarm_frames = self.host.prewarm_frames.saturating_add(1);
@@ -1420,7 +1420,7 @@ impl PopupRoot {
                 cx,
             )
             .into_any_element();
-        let templates = self.render_templates(cx);
+        let profiles = self.render_profiles(cx);
         let corner = px((radius - 1.0).max(0.0));
         let bar = div()
             .flex()
@@ -1432,7 +1432,7 @@ impl PopupRoot {
             .gap(px(2.0))
             .border_color(palette.card_stroke)
             .bg(palette.footer_background)
-            .child(templates)
+            .child(profiles)
             .children(link)
             .child(settings);
         // By a top taskbar the bar caps the capsule instead of closing it.
@@ -1444,37 +1444,37 @@ impl PopupRoot {
         bar.into_any_element()
     }
 
-    /// Template buttons and the quick-save "+" filling the bar's leading side.
-    fn render_templates(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// Profile buttons and the quick-save "+" filling the bar's leading side.
+    fn render_profiles(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let model = self.model.read(cx);
-        let templates: Vec<(TemplateIcon, bool)> = model
+        let profiles: Vec<(ProfileIcon, bool)> = model
             .settings
-            .templates
+            .profiles
             .iter()
-            .map(|template| (template.icon, model.template_active(template)))
+            .map(|profile| (profile.icon, model.profile_active(profile)))
             .collect();
-        let can_save = model.can_save_template();
+        let can_save = model.can_save_profile();
         // A drag that ended outside the bar dropped nowhere: cancel it.
         if !cx.has_active_drag() {
-            self.template_drag = None;
+            self.profile_drag = None;
         }
         let drag = self
-            .template_drag
-            .filter(|drag| drag.from < templates.len() && drag.slot < templates.len());
-        // While dragging, the dragged template already stands in its new slot.
-        let mut order: Vec<usize> = (0..templates.len()).collect();
+            .profile_drag
+            .filter(|drag| drag.from < profiles.len() && drag.slot < profiles.len());
+        // While dragging, the dragged profile already stands in its new slot.
+        let mut order: Vec<usize> = (0..profiles.len()).collect();
         if let Some(drag) = drag {
             let moved = order.remove(drag.from);
             order.insert(drag.slot, moved);
         }
-        let mut buttons = Vec::with_capacity(templates.len() + 1);
+        let mut buttons = Vec::with_capacity(profiles.len() + 1);
         for (slot, index) in order.into_iter().enumerate() {
-            let (glyph, active) = templates[index];
+            let (glyph, active) = profiles[index];
             let apply_model = self.model.clone();
             let this = cx.entity();
             let dragged = drag.is_some_and(|drag| drag.from == index);
-            let preview = TemplateDragPreview {
-                glyph: template_glyph(glyph),
+            let preview = ProfileDragPreview {
+                glyph: profile_glyph(glyph),
                 color: self.palette.accent,
                 fill: self.palette.solid_background,
                 stroke: self.palette.card_stroke,
@@ -1482,22 +1482,22 @@ impl PopupRoot {
             let drag_root = cx.entity();
             let button = self
                 .footer_button(
-                    &format!("template-{index}"),
-                    template_glyph(glyph),
-                    active || self.template_menu == Some(index),
+                    &format!("profile-{index}"),
+                    profile_glyph(glyph),
+                    active || self.profile_menu == Some(index),
                     move |_, _, cx| {
                         this.update(cx, |root, cx| {
-                            root.template_menu = None;
+                            root.profile_menu = None;
                             cx.notify();
                         });
-                        apply_model.update(cx, |model, cx| model.apply_template(index, cx));
+                        apply_model.update(cx, |model, cx| model.apply_profile(index, cx));
                     },
                     cx,
                 )
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |root, _: &MouseDownEvent, _, cx| {
-                        root.template_menu = if root.template_menu == Some(index) {
+                        root.profile_menu = if root.profile_menu == Some(index) {
                             None
                         } else {
                             Some(index)
@@ -1505,10 +1505,10 @@ impl PopupRoot {
                         cx.notify();
                     }),
                 )
-                .on_drag(TemplateDrag(index), move |_, _, _, cx| {
+                .on_drag(ProfileDrag(index), move |_, _, _, cx| {
                     drag_root.update(cx, |root, cx| {
-                        root.template_menu = None;
-                        root.template_drag = Some(TemplateDragState {
+                        root.profile_menu = None;
+                        root.profile_drag = Some(ProfileDragState {
                             from: index,
                             slot: index,
                         });
@@ -1516,9 +1516,9 @@ impl PopupRoot {
                     });
                     cx.new(|_| preview.clone())
                 })
-                .on_drag_move::<TemplateDrag>(cx.listener(
-                    move |root, event: &DragMoveEvent<TemplateDrag>, _, cx| {
-                        if let Some(drag) = &mut root.template_drag
+                .on_drag_move::<ProfileDrag>(cx.listener(
+                    move |root, event: &DragMoveEvent<ProfileDrag>, _, cx| {
+                        if let Some(drag) = &mut root.profile_drag
                             && drag.slot != slot
                             && event.bounds.contains(&event.event.position)
                         {
@@ -1535,14 +1535,14 @@ impl PopupRoot {
             let this = cx.entity();
             buttons.push(
                 self.footer_button(
-                    "template-add",
+                    "profile-add",
                     "fluent-add",
                     false,
                     move |_, _, cx| {
-                        let saved = save_model.update(cx, |model, cx| model.save_template(cx));
-                        // Open the glyph picker so the new template gets its icon.
+                        let saved = save_model.update(cx, |model, cx| model.save_profile(cx));
+                        // Open the glyph picker so the new profile gets its icon.
                         this.update(cx, |root, cx| {
-                            root.template_menu = saved;
+                            root.profile_menu = saved;
                             cx.notify();
                         });
                     },
@@ -1552,7 +1552,7 @@ impl PopupRoot {
             );
         }
         div()
-            .id("templates")
+            .id("profiles")
             .flex_1()
             .min_w_0()
             .h_full()
@@ -1561,14 +1561,13 @@ impl PopupRoot {
             .items_center()
             .gap(px(2.0))
             .overflow_x_scroll()
-            .on_drop(cx.listener(|root, dropped: &TemplateDrag, _, cx| {
-                if let Some(drag) = root.template_drag.take()
+            .on_drop(cx.listener(|root, dropped: &ProfileDrag, _, cx| {
+                if let Some(drag) = root.profile_drag.take()
                     && drag.from == dropped.0
                     && drag.from != drag.slot
                 {
-                    root.model.update(cx, |model, cx| {
-                        model.move_template(drag.from, drag.slot, cx)
-                    });
+                    root.model
+                        .update(cx, |model, cx| model.move_profile(drag.from, drag.slot, cx));
                 }
                 cx.notify();
             }))
@@ -1576,44 +1575,44 @@ impl PopupRoot {
             .into_any_element()
     }
 
-    /// Glyph picker and delete action for one template, above the bar.
+    /// Glyph picker and delete action for one profile, above the bar.
     /// Returns the dismissing scrim and the flyout.
-    fn render_template_menu(&mut self, index: usize, cx: &mut Context<Self>) -> [AnyElement; 2] {
+    fn render_profile_menu(&mut self, index: usize, cx: &mut Context<Self>) -> [AnyElement; 2] {
         let palette = self.palette.clone();
         let current = self
             .model
             .read(cx)
             .settings
-            .templates
+            .profiles
             .get(index)
-            .map(|template| template.icon);
+            .map(|profile| profile.icon);
         let dismiss =
             |root: &mut Self, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>| {
-                root.template_menu = None;
+                root.profile_menu = None;
                 cx.notify();
             };
         let scrim = div()
-            .id("template-menu-scrim")
+            .id("profile-menu-scrim")
             .absolute()
             .inset_0()
             .occlude()
             .on_mouse_down(MouseButton::Left, cx.listener(dismiss))
             .on_mouse_down(MouseButton::Right, cx.listener(dismiss))
             .into_any_element();
-        let mut tiles = Vec::with_capacity(TemplateIcon::ALL.len());
-        for glyph in TemplateIcon::ALL {
+        let mut tiles = Vec::with_capacity(ProfileIcon::ALL.len());
+        for glyph in ProfileIcon::ALL {
             let model = self.model.clone();
             let this = cx.entity();
-            let name = template_glyph(glyph);
+            let name = profile_glyph(glyph);
             tiles.push(
                 self.footer_button(
                     name,
                     name,
                     current == Some(glyph),
                     move |_, _, cx| {
-                        model.update(cx, |model, cx| model.set_template_icon(index, glyph, cx));
+                        model.update(cx, |model, cx| model.set_profile_icon(index, glyph, cx));
                         this.update(cx, |root, cx| {
-                            root.template_menu = None;
+                            root.profile_menu = None;
                             cx.notify();
                         });
                     },
@@ -1625,14 +1624,14 @@ impl PopupRoot {
         let delete = {
             let model = self.model.clone();
             let this = cx.entity();
-            let hover_id = fx::key("template-delete");
+            let hover_id = fx::key("profile-delete");
             let hover = self.fx.toggle(
-                fx::key("template-delete-hover"),
+                fx::key("profile-delete-hover"),
                 self.hovered(hover_id),
                 fx::FASTER,
             );
             let mut row = div()
-                .id("template-delete")
+                .id("profile-delete")
                 .relative()
                 .h(px(BUTTON))
                 .px(px(9.0))
@@ -1643,9 +1642,9 @@ impl PopupRoot {
                 .rounded(px(6.0))
                 .on_hover(self.hover_listener(hover_id, cx))
                 .on_click(move |_, _, cx| {
-                    model.update(cx, |model, cx| model.delete_template(index, cx));
+                    model.update(cx, |model, cx| model.delete_profile(index, cx));
                     this.update(cx, |root, cx| {
-                        root.template_menu = None;
+                        root.profile_menu = None;
                         cx.notify();
                     });
                 });
@@ -1660,19 +1659,19 @@ impl PopupRoot {
             }
             row.child(icon("fluent-delete", GLYPH, palette.chrome_icon))
                 .child(SharedString::from(
-                    crate::i18n::tr("popup-template-delete").to_owned(),
+                    crate::i18n::tr("popup-profile-delete").to_owned(),
                 ))
         };
-        let offset = self.chrome_height() + TEMPLATE_MENU_INSET - CHROME_INSET;
+        let offset = self.chrome_height() + PROFILE_MENU_INSET - CHROME_INSET;
         let menu = div()
-            .id("template-menu")
+            .id("profile-menu")
             .absolute()
-            .left(px(TEMPLATE_MENU_INSET))
-            .h(px(TEMPLATE_MENU_HEIGHT))
-            .p(px(TEMPLATE_MENU_PADDING))
+            .left(px(PROFILE_MENU_INSET))
+            .h(px(PROFILE_MENU_HEIGHT))
+            .p(px(PROFILE_MENU_PADDING))
             .flex()
             .flex_col()
-            .gap(px(TEMPLATE_MENU_GAP))
+            .gap(px(PROFILE_MENU_GAP))
             .rounded(px(palette.card_radius))
             .bg(palette.solid_background)
             .border_1()
@@ -1680,7 +1679,7 @@ impl PopupRoot {
             .occlude()
             .child(
                 div()
-                    .w(px(TEMPLATE_MENU_COLUMNS as f32 * (BUTTON + 2.0) - 2.0))
+                    .w(px(PROFILE_MENU_COLUMNS as f32 * (BUTTON + 2.0) - 2.0))
                     .flex()
                     .flex_row()
                     .flex_wrap()

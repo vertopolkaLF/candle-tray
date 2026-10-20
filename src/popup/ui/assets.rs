@@ -10,22 +10,22 @@ use gpui::{AssetSource, SharedString};
 
 pub(crate) struct PopupAssets;
 
-/// Asset name of a template glyph.
-pub(crate) fn template_glyph(icon: crate::settings::TemplateIcon) -> &'static str {
-    use crate::settings::TemplateIcon;
+/// Asset name of a profile glyph.
+pub(crate) fn profile_glyph(icon: crate::settings::ProfileIcon) -> &'static str {
+    use crate::settings::ProfileIcon;
     match icon {
-        TemplateIcon::Sun => "template-sun",
-        TemplateIcon::Moon => "template-moon",
-        TemplateIcon::Lightbulb => "template-lightbulb",
-        TemplateIcon::Book => "template-book",
-        TemplateIcon::Movie => "template-movie",
-        TemplateIcon::Game => "template-game",
-        TemplateIcon::Code => "template-code",
-        TemplateIcon::Work => "template-work",
-        TemplateIcon::Coffee => "template-coffee",
-        TemplateIcon::Home => "template-home",
-        TemplateIcon::Star => "template-star",
-        TemplateIcon::Heart => "template-heart",
+        ProfileIcon::Sun => "profile-sun",
+        ProfileIcon::Moon => "profile-moon",
+        ProfileIcon::Lightbulb => "profile-lightbulb",
+        ProfileIcon::Book => "profile-book",
+        ProfileIcon::Movie => "profile-movie",
+        ProfileIcon::Game => "profile-game",
+        ProfileIcon::Code => "profile-code",
+        ProfileIcon::Work => "profile-work",
+        ProfileIcon::Coffee => "profile-coffee",
+        ProfileIcon::Home => "profile-home",
+        ProfileIcon::Star => "profile-star",
+        ProfileIcon::Heart => "profile-heart",
     }
 }
 
@@ -63,29 +63,32 @@ fn source(name: &str) -> Option<&'static str> {
         }
         "fluent-add" => include_str!("../../../assets/icons/fluent-add-20-filled.svg"),
         "fluent-delete" => include_str!("../../../assets/icons/fluent-delete-20-regular.svg"),
-        "template-sun" => include_str!("../../../assets/icons/fluent-weather-sunny-20-regular.svg"),
-        "template-moon" => include_str!("../../../assets/icons/fluent-weather-moon-20-regular.svg"),
-        "template-lightbulb" => {
+        "profile-sun" => include_str!("../../../assets/icons/fluent-weather-sunny-20-regular.svg"),
+        "profile-moon" => include_str!("../../../assets/icons/fluent-weather-moon-20-regular.svg"),
+        "profile-lightbulb" => {
             include_str!("../../../assets/icons/fluent-lightbulb-20-regular.svg")
         }
-        "template-book" => include_str!("../../../assets/icons/fluent-book-open-20-regular.svg"),
-        "template-movie" => {
+        "profile-book" => include_str!("../../../assets/icons/fluent-book-open-20-regular.svg"),
+        "profile-movie" => {
             include_str!("../../../assets/icons/fluent-movies-and-tv-20-regular.svg")
         }
-        "template-game" => include_str!("../../../assets/icons/fluent-games-20-regular.svg"),
-        "template-code" => include_str!("../../../assets/icons/fluent-code-20-regular.svg"),
-        "template-work" => include_str!("../../../assets/icons/fluent-briefcase-20-regular.svg"),
-        "template-coffee" => {
+        "profile-game" => include_str!("../../../assets/icons/fluent-games-20-regular.svg"),
+        "profile-code" => include_str!("../../../assets/icons/fluent-code-20-regular.svg"),
+        "profile-work" => include_str!("../../../assets/icons/fluent-briefcase-20-regular.svg"),
+        "profile-coffee" => {
             include_str!("../../../assets/icons/fluent-drink-coffee-20-regular.svg")
         }
-        "template-home" => include_str!("../../../assets/icons/fluent-home-20-regular.svg"),
-        "template-star" => include_str!("../../../assets/icons/fluent-star-20-regular.svg"),
-        "template-heart" => include_str!("../../../assets/icons/fluent-heart-20-regular.svg"),
+        "profile-home" => include_str!("../../../assets/icons/fluent-home-20-regular.svg"),
+        "profile-star" => include_str!("../../../assets/icons/fluent-star-20-regular.svg"),
+        "profile-heart" => include_str!("../../../assets/icons/fluent-heart-20-regular.svg"),
         // Phosphor glyphs used by the Settings window, keyed by file stem.
         "check-bold" => include_str!("../../../assets/icons/ph-check-bold.svg"),
         "check-circle-fill" => include_str!("../../../assets/icons/ph-check-circle-fill.svg"),
         "dots-three-bold" => include_str!("../../../assets/icons/ph-dots-three-bold.svg"),
         "info-fill" => include_str!("../../../assets/icons/ph-info-fill.svg"),
+        "sliders-horizontal-fill" => {
+            include_str!("../../../assets/icons/ph-sliders-horizontal-fill.svg")
+        }
         "plus-bold" => include_str!("../../../assets/icons/ph-plus-bold.svg"),
         "x-circle-fill" => include_str!("../../../assets/icons/ph-x-circle-fill.svg"),
         "caret-down-bold" => include_str!("../../../assets/icons/ph-caret-down-bold.svg"),

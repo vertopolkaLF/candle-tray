@@ -1,7 +1,7 @@
 //! Settings window (GPUI), opened from the popup footer or the tray menu.
 //!
 //! The component kit, theme, Mica backdrop and text input are Codex
-//! Minibar's; the window and its two pages are Candle Tray's own.
+//! Minibar's; the window and its pages are Candle Tray's own.
 
 mod backdrop;
 #[allow(dead_code)]
@@ -9,6 +9,7 @@ pub(crate) mod input;
 #[allow(dead_code)]
 pub(crate) mod kit;
 mod pages;
+mod profiles;
 #[allow(dead_code)]
 pub(crate) mod theme;
 mod window;

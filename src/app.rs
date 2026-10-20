@@ -10,7 +10,7 @@ use gpui::Context;
 
 use crate::levels;
 use crate::monitors::{Command, Event, LevelTarget, Monitor, MonitorService, SnapshotReason};
-use crate::settings::{MonitorSettings, Settings, Template, TemplateIcon, TemplateLevels};
+use crate::settings::{MonitorSettings, Profile, ProfileIcon, ProfileLevels, Settings};
 use crate::twinkle_import::PendingImport;
 
 /// Persists a settings snapshot off the UI thread (the serial settings
@@ -58,6 +58,7 @@ impl MonitorRow {
 impl AppModel {
     pub fn new(settings: Settings, service: Arc<MonitorService>, persist: PersistFn) -> Self {
         service.send(Command::SetThrottle(throttle(&settings)));
+        publish_hotkeys(&settings);
         Self {
             monitors: Vec::new(),
             settings,
@@ -390,53 +391,57 @@ impl AppModel {
         cx.notify();
     }
 
-    // ----- templates ---------------------------------------------------------
+    // ----- profiles ---------------------------------------------------------
 
-    /// Current levels of every visible display, as a template would save them.
-    fn current_levels(&self) -> std::collections::BTreeMap<String, TemplateLevels> {
+    /// Current levels of every visible display, as a profile would save them.
+    fn current_levels(&self) -> std::collections::BTreeMap<String, ProfileLevels> {
         self.rows()
             .into_iter()
             .filter(|row| !row.monitor.unresponsive)
             .filter_map(|row| {
-                let levels = TemplateLevels {
+                let levels = ProfileLevels {
                     brightness: row.slider,
                     sdr: row.monitor.sdr.map(|sdr| sdr.percent),
                     contrast: row.contrast(),
                 };
-                (levels != TemplateLevels::default()).then(|| (row.monitor.id.clone(), levels))
+                (levels != ProfileLevels::default()).then(|| (row.monitor.id.clone(), levels))
             })
             .collect()
     }
 
-    /// Whether the bottom bar can save a template right now.
-    pub fn can_save_template(&self) -> bool {
+    /// Whether the bottom bar can save a profile right now.
+    pub fn can_save_profile(&self) -> bool {
         !self.current_levels().is_empty()
     }
 
-    /// Save the current levels as a new template; returns its index.
-    pub fn save_template(&mut self, cx: &mut Context<Self>) -> Option<usize> {
+    /// Save the current levels as a new profile; returns its index.
+    pub fn save_profile(&mut self, cx: &mut Context<Self>) -> Option<usize> {
         let levels = self.current_levels();
         if levels.is_empty() {
             return None;
         }
-        // A fresh glyph tells the new template apart until the user picks one.
-        let icon = TemplateIcon::ALL
+        // A fresh glyph tells the new profile apart until the user picks one.
+        let icon = ProfileIcon::ALL
             .into_iter()
-            .find(|icon| self.settings.templates.iter().all(|t| t.icon != *icon))
+            .find(|icon| self.settings.profiles.iter().all(|t| t.icon != *icon))
             .unwrap_or_default();
         self.edit(cx, |settings| {
-            settings.templates.push(Template { icon, levels })
+            settings.profiles.push(Profile {
+                icon,
+                levels,
+                ..Default::default()
+            })
         });
-        Some(self.settings.templates.len() - 1)
+        Some(self.settings.profiles.len() - 1)
     }
 
-    /// Apply a template to the connected displays it knows.
-    pub fn apply_template(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(template) = self.settings.templates.get(index).cloned() else {
+    /// Apply a profile to the connected displays it knows.
+    pub fn apply_profile(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(profile) = self.settings.profiles.get(index).cloned() else {
             return;
         };
         let mut targets = Vec::new();
-        for (id, saved) in &template.levels {
+        for (id, saved) in &profile.levels {
             let Some(monitor) = self
                 .monitors
                 .iter_mut()
@@ -481,10 +486,10 @@ impl AppModel {
         }
     }
 
-    /// The connected displays a template knows all show its levels.
-    pub fn template_active(&self, template: &Template) -> bool {
+    /// The connected displays a profile knows all show its levels.
+    pub fn profile_active(&self, profile: &Profile) -> bool {
         let mut matched = false;
-        for (id, saved) in &template.levels {
+        for (id, saved) in &profile.levels {
             let Some(monitor) = self.monitors.iter().find(|m| m.id == *id) else {
                 continue;
             };
@@ -506,29 +511,114 @@ impl AppModel {
         matched
     }
 
-    pub fn set_template_icon(&mut self, index: usize, icon: TemplateIcon, cx: &mut Context<Self>) {
+    pub fn set_profile_icon(&mut self, index: usize, icon: ProfileIcon, cx: &mut Context<Self>) {
         self.edit(cx, |settings| {
-            if let Some(template) = settings.templates.get_mut(index) {
-                template.icon = icon;
+            if let Some(profile) = settings.profiles.get_mut(index) {
+                profile.icon = icon;
             }
         });
     }
 
-    /// Move a template to another place in the bottom bar.
-    pub fn move_template(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+    /// The profile's name, or its numbered default.
+    pub fn profile_name(&self, index: usize) -> String {
+        self.settings
+            .profiles
+            .get(index)
+            .map(|profile| profile.name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                crate::i18n::format(
+                    "profiles-default-name",
+                    &[("number", (index + 1).to_string())],
+                )
+            })
+    }
+
+    /// Display name for a profile entry, connected or not.
+    pub fn display_name(&self, id: &str) -> String {
+        self.all_rows()
+            .into_iter()
+            .find(|row| row.monitor.id == id)
+            .map(|row| row.name)
+            .or_else(|| self.settings.monitors.get(id).and_then(|m| m.name.clone()))
+            .unwrap_or_else(|| id.to_owned())
+    }
+
+    pub fn rename_profile(&mut self, index: usize, name: String, cx: &mut Context<Self>) {
         self.edit(cx, |settings| {
-            let templates = &mut settings.templates;
-            if from < templates.len() && to < templates.len() && from != to {
-                let moved = templates.remove(from);
-                templates.insert(to, moved);
+            if let Some(profile) = settings.profiles.get_mut(index) {
+                profile.name = name.trim().to_owned();
             }
         });
     }
 
-    pub fn delete_template(&mut self, index: usize, cx: &mut Context<Self>) {
+    /// Give a profile a shortcut, taking it away from any other profile.
+    pub fn set_profile_hotkey(
+        &mut self,
+        index: usize,
+        hotkey: Option<crate::hotkey::Hotkey>,
+        cx: &mut Context<Self>,
+    ) {
         self.edit(cx, |settings| {
-            if index < settings.templates.len() {
-                settings.templates.remove(index);
+            for (other, profile) in settings.profiles.iter_mut().enumerate() {
+                if other == index {
+                    profile.hotkey = hotkey;
+                } else if hotkey.is_some() && profile.hotkey == hotkey {
+                    profile.hotkey = None;
+                }
+            }
+        });
+    }
+
+    /// Edit one stored level of a profile without touching the hardware.
+    pub fn set_profile_level(
+        &mut self,
+        index: usize,
+        id: &str,
+        change: impl FnOnce(&mut ProfileLevels),
+        cx: &mut Context<Self>,
+    ) {
+        let id = id.to_owned();
+        self.edit(cx, move |settings| {
+            if let Some(levels) = settings
+                .profiles
+                .get_mut(index)
+                .and_then(|profile| profile.levels.get_mut(&id))
+            {
+                change(levels);
+            }
+        });
+    }
+
+    /// Replace a profile's levels with the current ones.
+    pub fn recapture_profile(&mut self, index: usize, cx: &mut Context<Self>) {
+        let levels = self.current_levels();
+        if levels.is_empty() {
+            return;
+        }
+        self.edit(cx, |settings| {
+            if let Some(profile) = settings.profiles.get_mut(index) {
+                profile.levels = levels;
+            }
+        });
+    }
+
+    /// Move a profile to another place in the bottom bar.
+    pub fn move_profile(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        self.edit(cx, |settings| {
+            let profiles = &mut settings.profiles;
+            if from < profiles.len() && to < profiles.len() && from != to {
+                let moved = profiles.remove(from);
+                profiles.insert(to, moved);
+            }
+        });
+    }
+
+    pub fn delete_profile(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.edit(cx, |settings| {
+            if index < settings.profiles.len() {
+                settings.profiles.remove(index);
             }
         });
     }
@@ -566,6 +656,7 @@ impl AppModel {
 
     fn apply_runtime_effects(&self, before: &Settings) {
         let now = &self.settings;
+        publish_hotkeys(now);
         if now.update_interval_ms != before.update_interval_ms {
             self.service.send(Command::SetThrottle(throttle(now)));
         }
@@ -627,6 +718,17 @@ impl AppModel {
 
 /// How long a local edit outranks hardware reports for the same display.
 const LOCAL_EDIT_HOLD: Duration = Duration::from_millis(1500);
+
+/// Hand the profile shortcuts to the tray thread, which registers them.
+fn publish_hotkeys(settings: &Settings) {
+    crate::hotkey::set_desired(
+        settings
+            .profiles
+            .iter()
+            .map(|profile| profile.hotkey)
+            .collect(),
+    );
+}
 
 fn throttle(settings: &Settings) -> std::time::Duration {
     std::time::Duration::from_millis(u64::from(settings.update_interval_ms.clamp(16, 2000)))

@@ -80,10 +80,10 @@ impl TrayIcon {
     ];
 }
 
-/// Glyph of a level template in the popup's bottom bar.
+/// Glyph of a level profile in the popup's bottom bar.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TemplateIcon {
+pub enum ProfileIcon {
     #[default]
     Sun,
     Moon,
@@ -99,7 +99,7 @@ pub enum TemplateIcon {
     Heart,
 }
 
-impl TemplateIcon {
+impl ProfileIcon {
     pub const ALL: [Self; 12] = [
         Self::Sun,
         Self::Moon,
@@ -116,10 +116,10 @@ impl TemplateIcon {
     ];
 }
 
-/// Levels a template stores for one display; `None` leaves that level alone.
+/// Levels a profile stores for one display; `None` leaves that level alone.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct TemplateLevels {
+pub struct ProfileLevels {
     /// Slider (normalized) brightness.
     pub brightness: Option<u8>,
     /// SDR white level percent.
@@ -131,9 +131,13 @@ pub struct TemplateLevels {
 /// Saved levels applied in one click from the popup's bottom bar.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Template {
-    pub icon: TemplateIcon,
-    pub levels: BTreeMap<MonitorId, TemplateLevels>,
+pub struct Profile {
+    /// User-chosen name; empty shows a numbered default.
+    pub name: String,
+    pub icon: ProfileIcon,
+    /// System-wide shortcut that applies the profile.
+    pub hotkey: Option<crate::hotkey::Hotkey>,
+    pub levels: BTreeMap<MonitorId, ProfileLevels>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,8 +216,9 @@ pub struct Settings {
     pub monitors: BTreeMap<MonitorId, MonitorSettings>,
     /// Set once the Twinkle Tray import prompt was answered either way.
     pub twinkle_import_done: bool,
-    /// Level templates in bottom-bar order.
-    pub templates: Vec<Template>,
+    /// Level profiles in bottom-bar order.
+    #[serde(alias = "templates")]
+    pub profiles: Vec<Profile>,
 }
 
 impl Default for Settings {
@@ -233,7 +238,7 @@ impl Default for Settings {
             order: Vec::new(),
             monitors: BTreeMap::new(),
             twinkle_import_done: false,
-            templates: Vec::new(),
+            profiles: Vec::new(),
         }
     }
 }
@@ -487,13 +492,21 @@ mod tests {
         assert!(settings.restore_levels);
     }
     #[test]
-    fn templates_round_trip() {
+    fn profiles_round_trip() {
         let mut settings = Settings::default();
-        settings.templates.push(Template {
-            icon: TemplateIcon::Moon,
+        settings.profiles.push(Profile {
+            name: "Night".into(),
+            icon: ProfileIcon::Moon,
+            hotkey: Some(crate::hotkey::Hotkey {
+                ctrl: true,
+                alt: true,
+                shift: false,
+                win: false,
+                key: 0x31,
+            }),
             levels: BTreeMap::from([(
                 r"\?\DISPLAY#DEL#1".to_owned(),
-                TemplateLevels {
+                ProfileLevels {
                     brightness: Some(30),
                     sdr: None,
                     contrast: Some(55),
@@ -502,6 +515,19 @@ mod tests {
         });
         let raw = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&raw).unwrap(), settings);
+    }
+    #[test]
+    fn templates_from_earlier_builds_load_as_profiles() {
+        let settings: Settings = toml::from_str(
+            "[[templates]]
+icon = 'moon'
+[templates.levels.a]
+brightness = 40",
+        )
+        .unwrap();
+        assert_eq!(settings.profiles[0].icon, ProfileIcon::Moon);
+        assert_eq!(settings.profiles[0].levels["a"].brightness, Some(40));
+        assert_eq!(settings.profiles[0].hotkey, None);
     }
     #[test]
     fn corrupt_settings_are_preserved() {

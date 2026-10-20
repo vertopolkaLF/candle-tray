@@ -106,6 +106,8 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
     let mut tooltip_level = u8::MAX - 1;
     let mut next_theme_check = Instant::now();
     TRAY_THREAD.store(current_thread_id(), Ordering::SeqCst);
+    // Registered from this thread so WM_HOTKEY reaches its message pump.
+    let mut hotkeys = crate::hotkey::Registration::default();
     loop {
         // Idle, only the taskbar theme check needs a timer: every other
         // input arrives as a window message or a `wake`.
@@ -140,7 +142,15 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
                 _ => {}
             }
         }
+        if hotkeys.sync() {
+            // Settings shows whether each shortcut could be registered.
+            popup::send_command(PopupCommand::Run(Box::new(|cx| cx.refresh_windows())));
+        }
+        for index in crate::hotkey::take_pressed() {
+            popup::send_command(PopupCommand::ApplyProfile(index));
+        }
         if EXIT_REQUESTED.load(Ordering::SeqCst) {
+            drop(hotkeys);
             drop(tray);
             on_exit();
             return Ok(());

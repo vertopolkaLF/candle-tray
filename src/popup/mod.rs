@@ -34,6 +34,8 @@ pub enum PopupCommand {
     /// Settings changed on another thread (or another window).
     SettingsChanged,
     OpenSettings,
+    /// A profile shortcut was pressed.
+    ApplyProfile(usize),
     /// Run on the GPUI thread with the app context (tray menu actions etc.).
     Run(Box<dyn FnOnce(&mut gpui::App) + Send>),
 }
@@ -249,6 +251,7 @@ pub fn pump_messages() {
     unsafe {
         let mut message = std::mem::zeroed::<MSG>();
         while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+            crate::hotkey::observe_message(&message);
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
