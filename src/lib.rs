@@ -1,3 +1,11 @@
+pub mod app;
+pub mod autostart;
+pub mod i18n;
 pub mod levels;
+pub mod logger;
 pub mod monitors;
+pub mod popup;
 pub mod settings;
+pub mod settings_window;
+pub mod theme;
+pub mod tray;
