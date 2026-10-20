@@ -22,6 +22,22 @@
 //! job (see `crate::levels`).
 
 use std::time::Duration;
+#[cfg(windows)]
+mod ddc;
+#[cfg(windows)]
+mod enumerate;
+#[cfg(windows)]
+mod events;
+#[cfg(windows)]
+mod hdr;
+mod rules;
+#[cfg(windows)]
+mod service;
+#[cfg(windows)]
+mod wmi;
+fn log(message: impl std::fmt::Display) {
+    eprintln!("[monitors] {message}");
+}
 
 /// Stable per-display key (device path instance, legacy `hwid[2]`).
 pub type MonitorId = String;
@@ -154,7 +170,7 @@ pub enum Event {
 
 /// Handle to the running service. Dropping it shuts the service down.
 pub struct MonitorService {
-    // Implementation detail.
+    sender: std::sync::mpsc::Sender<Command>,
 }
 
 impl MonitorService {
@@ -162,12 +178,30 @@ impl MonitorService {
     /// power and resume notifications) and an initial refresh. `on_event` is
     /// called from service threads; it must be cheap and non-blocking.
     pub fn start(on_event: impl Fn(Event) + Send + Sync + 'static) -> Self {
-        let _ = on_event;
-        todo!("monitor service")
+        #[cfg(windows)]
+        {
+            service::start(on_event)
+        }
+        #[cfg(not(windows))]
+        {
+            let (sender, _) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                on_event(Event::Snapshot {
+                    monitors: Vec::new(),
+                    reason: SnapshotReason::Startup,
+                })
+            });
+            Self { sender }
+        }
     }
 
     pub fn send(&self, command: Command) {
-        let _ = command;
-        todo!("monitor service")
+        let _ = self.sender.send(command);
+    }
+}
+
+impl Drop for MonitorService {
+    fn drop(&mut self) {
+        let _ = self.sender.send(Command::Shutdown);
     }
 }
