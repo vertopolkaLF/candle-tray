@@ -392,9 +392,8 @@ impl PopupRoot {
             })
             .detach();
         }
-        #[cfg(not(windows))]
-        let _ = cx;
         self.host.last_region = None;
+        crate::idle::enter_soon(cx);
     }
 
     // ----- geometry ---------------------------------------------------------

@@ -517,9 +517,12 @@ impl Drop for WindowsWindow {
             .executor
             .spawn(async move {
                 let handle = this.hwnd;
+                // candle-tray patch: WM_DESTROY revokes drag and drop; a
+                // window the user closed is already gone.
                 unsafe {
-                    RevokeDragDrop(handle).log_err();
-                    DestroyWindow(handle).log_err();
+                    if IsWindow(Some(handle)).as_bool() {
+                        DestroyWindow(handle).log_err();
+                    }
                 }
             })
             .detach();

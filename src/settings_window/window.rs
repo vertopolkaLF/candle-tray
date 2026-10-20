@@ -97,7 +97,11 @@ impl SettingsWindow {
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
             // Hardware snapshots and edits from the popup repaint Settings.
             cx.observe(&model, |_, _, cx| cx.notify()),
-            cx.on_release(|_, _| super::window_closed()),
+            // The window's renderer is gone now; return its memory once idle.
+            cx.on_release(|_, cx| {
+                super::window_closed();
+                crate::idle::enter_soon(cx);
+            }),
         ];
         window.on_window_should_close(cx, |_, _| {
             super::window_closed();

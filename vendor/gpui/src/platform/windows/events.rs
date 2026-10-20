@@ -38,6 +38,11 @@ impl WindowsWindowInner {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        // candle-tray patch: a window coming on screen (shown, restored or
+        // resized) needs vsync-driven frames again.
+        if matches!(msg, WM_SHOWWINDOW | WM_SIZE) {
+            wake_vsync_thread();
+        }
         let handled = match msg {
             WM_ACTIVATE => self.handle_activate_msg(wparam),
             WM_CREATE => self.handle_create_msg(handle),
@@ -275,6 +280,13 @@ impl WindowsWindowInner {
     }
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
+        // candle-tray patch: OLE holds the drop target, and through it this
+        // window's state and renderer, until RevokeDragDrop. A window closed
+        // by the user is already destroyed when `WindowsWindow::drop` tries
+        // to revoke, so revoke here while the handle is still valid.
+        unsafe {
+            let _ = windows::Win32::System::Ole::RevokeDragDrop(handle);
+        }
         let callback = {
             let mut lock = self.state.borrow_mut();
             lock.callbacks.close.take()

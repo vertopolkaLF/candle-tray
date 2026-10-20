@@ -11,6 +11,7 @@ use windows::Win32::{
         },
         Direct3D11::{
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
+            D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS,
             D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS, D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS,
             D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
         },
@@ -177,10 +178,14 @@ fn get_device(
     debug_layer_available: bool,
 ) -> Result<ID3D11Device> {
     let mut device: Option<ID3D11Device> = None;
+    // candle-tray patch: the driver's threading optimizations spawn dozens of
+    // worker threads and tens of MB of commit for a few small windows.
+    let base_flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT
+        | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;
     let device_flags = if debug_layer_available {
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_DEBUG
+        base_flags | D3D11_CREATE_DEVICE_DEBUG
     } else {
-        D3D11_CREATE_DEVICE_BGRA_SUPPORT
+        base_flags
     };
     unsafe {
         D3D11CreateDevice(

@@ -159,7 +159,6 @@ fn run(
         .with_assets(assets::PopupAssets)
         .run(move |cx| {
             let model = init(cx);
-            crate::settings_window::init(cx);
             let default_font = theme::default_font_family(cx);
             // The tray starts hidden. Do not allocate large swap-chain/MSAA
             // surfaces before the user has even opened the popup.
@@ -229,6 +228,7 @@ fn handle_command(
 ) {
     match command {
         PopupCommand::Show { anchor } => {
+            crate::idle::leave();
             let _ = model.update(cx, |model, _| model.read_levels());
             #[cfg(windows)]
             {
@@ -282,6 +282,7 @@ fn handle_command(
             let _ = model.update(cx, |model, cx| model.reload_settings(cx));
         }
         PopupCommand::OpenSettings => {
+            crate::idle::leave();
             let model = model.clone();
             let _ = cx.update(|cx| crate::settings_window::open(model, cx));
         }

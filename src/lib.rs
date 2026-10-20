@@ -1,6 +1,7 @@
 pub mod app;
 pub mod autostart;
 pub mod i18n;
+pub mod idle;
 pub mod levels;
 pub mod logger;
 pub mod monitors;

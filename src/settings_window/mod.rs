@@ -13,7 +13,7 @@ mod pages;
 pub(crate) mod theme;
 mod window;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use gpui::{
     App, AppContext, Bounds, Entity, Point, TitlebarOptions, WindowBackgroundAppearance,
@@ -28,15 +28,11 @@ const WINDOW_HEIGHT: f32 = 640.0;
 thread_local! {
     static SETTINGS_WINDOW: RefCell<Option<WindowHandle<window::SettingsWindow>>> =
         const { RefCell::new(None) };
+    static KEYS_BOUND: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Register key bindings used by the Settings window. Called once when the
-/// GPUI application starts.
-pub fn init(cx: &mut App) {
-    input::bind_keys(cx);
-}
-
-/// Open Settings, or bring the open window to the front.
+/// Open Settings, or bring the open window to the front. Nothing of the
+/// Settings window exists before the first call.
 pub fn open(model: Entity<AppModel>, cx: &mut App) {
     if let Some(handle) = SETTINGS_WINDOW.with(|slot| *slot.borrow())
         && handle
@@ -44,6 +40,9 @@ pub fn open(model: Entity<AppModel>, cx: &mut App) {
             .is_ok()
     {
         return;
+    }
+    if !KEYS_BOUND.replace(true) {
+        input::bind_keys(cx);
     }
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
     let options = WindowOptions {
@@ -76,6 +75,11 @@ pub fn open(model: Entity<AppModel>, cx: &mut App) {
         }
         Err(error) => crate::logger::error(format!("could not open Settings: {error:#}")),
     }
+}
+
+/// Whether the Settings window exists. GPUI thread only.
+pub(crate) fn is_open() -> bool {
+    SETTINGS_WINDOW.with(|slot| slot.borrow().is_some())
 }
 
 /// Called by the window as it closes.

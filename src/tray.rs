@@ -5,7 +5,7 @@
 //! toggle the popup; the same loop polls for outside clicks and Escape while
 //! the popup is open, exactly like Codex Minibar's bridge.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -20,20 +20,54 @@ static MENU_DIRTY: AtomicBool = AtomicBool::new(false);
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Average brightness for the tooltip; 255 = unknown.
 static TOOLTIP_LEVEL: AtomicU8 = AtomicU8::new(255);
+/// Win32 id of the thread running [`run`]; 0 before it starts.
+static TRAY_THREAD: AtomicU32 = AtomicU32::new(0);
 
 /// Rebuild the menu labels (language changed).
 pub fn refresh_menu() {
     MENU_DIRTY.store(true, Ordering::SeqCst);
+    wake();
 }
 
 /// Publish the average brightness shown in the tooltip.
 pub fn set_tooltip_level(level: Option<u8>) {
     TOOLTIP_LEVEL.store(level.unwrap_or(255), Ordering::SeqCst);
+    wake();
 }
 
 /// Ask the tray thread to remove its icon and end the process.
 pub fn request_exit() {
     EXIT_REQUESTED.store(true, Ordering::SeqCst);
+    wake();
+}
+
+/// Interrupt the tray thread's idle wait so it picks up new state now.
+pub(crate) fn wake() {
+    let thread = TRAY_THREAD.load(Ordering::SeqCst);
+    if thread != 0 {
+        post_wake(thread);
+    }
+}
+
+#[cfg(windows)]
+fn post_wake(thread: u32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_NULL};
+    unsafe {
+        PostThreadMessageW(thread, WM_NULL, 0, 0);
+    }
+}
+
+#[cfg(not(windows))]
+fn post_wake(_thread: u32) {}
+
+#[cfg(windows)]
+fn current_thread_id() -> u32 {
+    unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() }
+}
+
+#[cfg(not(windows))]
+fn current_thread_id() -> u32 {
+    0
 }
 
 const MENU_REFRESH: &str = "refresh";
@@ -53,9 +87,12 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
         .context("create tray icon")?;
     let mut tooltip_level = u8::MAX - 1;
     let mut next_theme_check = Instant::now();
+    TRAY_THREAD.store(current_thread_id(), Ordering::SeqCst);
     loop {
+        // Idle, only the taskbar theme check needs a timer: every other
+        // input arrives as a window message or a `wake`.
         let active = popup::is_visible();
-        popup::wait_for_messages(Duration::from_millis(if active { 16 } else { 250 }));
+        popup::wait_for_messages(Duration::from_millis(if active { 16 } else { 1000 }));
         popup::pump_messages();
 
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {

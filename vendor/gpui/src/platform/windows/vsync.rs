@@ -1,5 +1,5 @@
 use std::{
-    sync::LazyLock,
+    sync::{Condvar, LazyLock, Mutex},
     time::{Duration, Instant},
 };
 
@@ -18,6 +18,37 @@ static QPC_TICKS_PER_SECOND: LazyLock<u64> = LazyLock::new(|| {
     unsafe { QueryPerformanceFrequency(&mut frequency).unwrap() };
     frequency as u64
 });
+
+// candle-tray patch: with no window on screen the vsync thread sleeps
+// instead of waking on every display refresh. Showing or resizing a window
+// wakes it at once, so the first animated frames are never delayed.
+static IDLE_WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+/// Wake the vsync thread from its idle wait.
+pub(crate) fn wake_vsync_thread() {
+    let (woken, condvar) = &IDLE_WAKE;
+    if let Ok(mut woken) = woken.lock() {
+        *woken = true;
+        condvar.notify_one();
+    }
+}
+
+/// Block until [`wake_vsync_thread`] or `timeout`, whichever comes first.
+/// Returns whether a wake arrived.
+pub(crate) fn wait_for_idle_wake(timeout: Duration) -> bool {
+    let (woken, condvar) = &IDLE_WAKE;
+    let Ok(mut guard) = woken.lock() else {
+        std::thread::sleep(timeout);
+        return false;
+    };
+    if !*guard {
+        guard = match condvar.wait_timeout(guard, timeout) {
+            Ok((guard, _)) => guard,
+            Err(poisoned) => poisoned.into_inner().0,
+        };
+    }
+    std::mem::replace(&mut *guard, false)
+}
 
 const VSYNC_INTERVAL_THRESHOLD: Duration = Duration::from_millis(1);
 const DEFAULT_VSYNC_INTERVAL: Duration = Duration::from_micros(16_666); // ~60Hz

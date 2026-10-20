@@ -183,6 +183,9 @@ fn show(anchor_x: i32, anchor_y: i32) {
     send_command(PopupCommand::Show {
         anchor: Some((anchor_x, anchor_y)),
     });
+    // A show from another thread (second launch) must start the tray's
+    // fast outside-click polling at once.
+    crate::tray::wake();
 }
 
 /// Show the popup beside the current pointer location.

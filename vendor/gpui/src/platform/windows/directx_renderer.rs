@@ -1000,9 +1000,29 @@ impl Drop for DirectXRenderer {
         #[cfg(debug_assertions)]
         report_live_objects(&self.devices.device).ok();
         unsafe {
-            ManuallyDrop::drop(&mut self.devices);
+            // candle-tray patch: the immediate context is shared by every
+            // window, and Direct3D destroys released objects only once the
+            // context no longer binds them and is flushed. Without this, each
+            // closed window kept its swap chain and MSAA targets alive.
+            let context = self.devices.device_context.clone();
             ManuallyDrop::drop(&mut self.resources);
+            drop(self.direct_composition.take());
+            unbind_and_flush(&context);
+            ManuallyDrop::drop(&mut self.devices);
         }
+    }
+}
+
+/// Unbind the resources a renderer leaves on the shared immediate context
+/// and flush it, so released objects are destroyed now. Every frame binds
+/// its own targets and shader resources again, so other windows are
+/// unaffected; pipeline state (rasterizer, blend) is left as is.
+pub(crate) fn unbind_and_flush(context: &ID3D11DeviceContext) {
+    unsafe {
+        context.OMSetRenderTargets(None, None);
+        context.VSSetShaderResources(0, Some(&[None, None]));
+        context.PSSetShaderResources(0, Some(&[None, None]));
+        context.Flush();
     }
 }
 

@@ -248,8 +248,18 @@ impl WindowsPlatform {
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
                 let mut software_rendering = directx_device.software;
+                // candle-tray patch: idle while no window is on screen. A wake
+                // (WM_SHOWWINDOW, WM_SIZE) arrives before the window is
+                // visible, so it keeps vsync running for a moment regardless.
+                let mut active_until = std::time::Instant::now();
                 loop {
-                    vsync_provider.wait_for_vsync();
+                    if any_window_on_screen(&all_windows)
+                        || std::time::Instant::now() < active_until
+                    {
+                        vsync_provider.wait_for_vsync();
+                    } else if wait_for_idle_wake(IDLE_VSYNC_POLL) {
+                        active_until = std::time::Instant::now() + IDLE_WAKE_GRACE;
+                    }
                     let device_lost = check_device_lost(&directx_device.device);
                     // codex-minibar patch: a software rendering switch rebuilds
                     // the devices like a device loss, without the settle delay.
@@ -729,6 +739,9 @@ impl WindowsPlatformInner {
                 if self.close_one_window(HWND(lparam.0 as _)) {
                     unsafe { PostQuitMessage(0) };
                 }
+                // candle-tray patch: the closed window's atlas and pipelines
+                // are gone by now; destroy them on the GPU too.
+                unbind_and_flush(&self.state.borrow().directx_devices.device_context);
                 Some(0)
             }
             WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD => self.run_foreground_task(),
@@ -1027,6 +1040,21 @@ fn load_icon() -> Result<HICON> {
 fn should_auto_hide_scrollbars() -> Result<bool> {
     let ui_settings = UISettings::new()?;
     Ok(ui_settings.AutoHideScrollBars()?)
+}
+
+/// How often the idle vsync thread still checks for a lost device.
+const IDLE_VSYNC_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+/// How long a wake keeps vsync running before visibility decides again.
+const IDLE_WAKE_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether any window is visible and not minimized.
+fn any_window_on_screen(all_windows: &std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>) -> bool {
+    let Some(all_windows) = all_windows.upgrade() else {
+        return false;
+    };
+    all_windows.read().iter().any(|hwnd| unsafe {
+        IsWindowVisible(hwnd.as_raw()).as_bool() && !IsIconic(hwnd.as_raw()).as_bool()
+    })
 }
 
 fn check_device_lost(device: &ID3D11Device) -> bool {
