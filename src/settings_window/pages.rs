@@ -7,7 +7,7 @@ use gpui::{
 use super::kit::{self, Button, Kit, Row, SliderRange};
 use super::window::SettingsWindow;
 use crate::monitors::{BrightnessBackend, MonitorKind};
-use crate::settings::{Language, PopupMaterial, Theme, TurnOffSetting};
+use crate::settings::{Language, PopupMaterial, Theme};
 
 /// Update intervals offered while dragging, in milliseconds.
 const UPDATE_INTERVALS: [u32; 5] = [50, 100, 250, 500, 1000];
@@ -114,16 +114,6 @@ impl SettingsWindow {
         });
 
         let behavior = kit::card_of(k, |k| {
-            let turn_off_labels = [
-                crate::i18n::tr("settings-turn-off-windows"),
-                crate::i18n::tr("settings-turn-off-ddc"),
-                crate::i18n::tr("settings-turn-off-both"),
-            ];
-            let turn_off_index = match s.turn_off {
-                TurnOffSetting::Windows => 0,
-                TurnOffSetting::Ddc => 1,
-                TurnOffSetting::Both => 2,
-            };
             let interval_index = UPDATE_INTERVALS
                 .iter()
                 .position(|ms| *ms >= s.update_interval_ms)
@@ -147,23 +137,6 @@ impl SettingsWindow {
                     s.restore_levels,
                     Self::h(cx, |this, value: bool, _, cx| {
                         this.edit(cx, move |settings| settings.restore_levels = value)
-                    }),
-                ),
-                kit::dropdown_row(
-                    k,
-                    "general-turn-off",
-                    tr("settings-turn-off-mode"),
-                    None,
-                    turn_off_labels.iter().map(|l| l.clone().into()).collect(),
-                    turn_off_index,
-                    false,
-                    Self::h(cx, |this, index: usize, _, cx| {
-                        let mode = match index {
-                            1 => TurnOffSetting::Ddc,
-                            2 => TurnOffSetting::Both,
-                            _ => TurnOffSetting::Windows,
-                        };
-                        this.edit(cx, move |settings| settings.turn_off = mode);
                     }),
                 ),
                 kit::dropdown_row(

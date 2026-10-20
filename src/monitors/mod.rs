@@ -93,6 +93,8 @@ pub struct Monitor {
     pub sdr: Option<SdrLevel>,
     /// The display reported VCP 0xD6 (power mode) in its capabilities.
     pub supports_ddc_power: bool,
+    /// Switched off through DDC/CI (VCP 0xD6) by this app.
+    pub powered_off: bool,
     /// True while the monitor's worker is stuck or timed out; the UI dims
     /// the row and ignores input until the next successful refresh.
     pub unresponsive: bool,
@@ -133,6 +135,13 @@ pub enum Command {
     /// change). Same coalescing as the single setters.
     Apply(Vec<LevelTarget>),
     TurnOff(TurnOffMode),
+    /// Switch one display on or off through DDC/CI (VCP 0xD6). When every
+    /// connected display is off, the next keyboard or mouse input switches
+    /// them all back on.
+    SetPower {
+        id: MonitorId,
+        on: bool,
+    },
     /// Minimum interval between hardware writes per target.
     SetThrottle(Duration),
     Shutdown,

@@ -48,7 +48,9 @@ enum Work {
     Probe(Target, Arc<Vec<Target>>),
     Capabilities,
     Write(Level, u8),
-    Power,
+    /// VCP 0xD6: `true` = on (1), `false` = DPM off (4). DPM off keeps the
+    /// monitor listening on DDC/CI, so it can be switched back on.
+    Power(bool),
 }
 struct Reply {
     id: String,
@@ -66,7 +68,8 @@ struct Slot {
     throttle: Throttle,
     refresh: Option<(Target, Arc<Vec<Target>>)>,
     capabilities: bool,
-    power: bool,
+    /// Requested DDC power state, not yet written.
+    power: Option<bool>,
     awaiting_probe: bool,
     active: bool,
 }
@@ -77,7 +80,7 @@ impl Slot {
             && self.throttle.pending.is_empty()
             && self.refresh.is_none()
             && !self.capabilities
-            && !(self.power && self.monitor.supports_ddc_power)
+            && self.power.is_none()
     }
     fn expire(&mut self, now: Instant) -> bool {
         if self
@@ -108,6 +111,12 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
             Work::Probe(mut target, targets) => {
                 // Releasing/reacquiring handles stays on this worker, behind any
                 // previous call. Never close a handle still executing in a driver.
+                // A re-probe cannot read back the power state; keep what the
+                // last power write established.
+                let was_off = state
+                    .as_ref()
+                    .is_some_and(|(previous, ..)| previous.monitor.powered_off);
+                target.monitor.powered_off = was_off;
                 drop(state.take());
                 let wmi = wmi::Wmi::connect()
                     .map_err(|e| log(format!("WMI: {e}")))
@@ -147,12 +156,14 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                         ddc.as_ref().is_some_and(|d| d.power_supported());
                 }
             }
-            Work::Power => {
-                if let Some((target, Some(ddc), _, _)) = &state
-                    && target.monitor.supports_ddc_power
-                    && !ddc.set(0xd6, 5)
-                {
-                    log(format!("DDC power failed: {}", target.monitor.id));
+            Work::Power(on) => {
+                if let Some((target, ddc, _, _)) = &mut state {
+                    match ddc {
+                        Some(ddc) if ddc.set(0xd6, if on { 1 } else { 4 }) => {
+                            target.monitor.powered_off = !on;
+                        }
+                        _ => log(format!("DDC power failed: {}", target.monitor.id)),
+                    }
                 }
             }
             Work::Write(level, percent) => {
@@ -223,6 +234,8 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
     let mut debounce: Option<(Instant, SnapshotReason)> = None;
     let mut windows_off_at: Option<Instant> = None;
     let mut queued = std::collections::VecDeque::new();
+    // Input tick seen when every display went dark, and since when.
+    let mut all_off_since: Option<(u32, Instant)> = None;
     loop {
         if windows_off_at.is_some_and(|at| Instant::now() >= at) {
             windows_off_at = None;
@@ -279,6 +292,12 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                         }
                     }
                 }
+                Ok(Command::SetPower { id, on }) => {
+                    log(format!("Setting DDC power of {id} to {on}"));
+                    if let Some(s) = slots.get_mut(&id).filter(|s| s.active) {
+                        s.power = Some(on);
+                    }
+                }
                 Ok(Command::TurnOff(mode)) => {
                     log(format!("Turning displays off ({mode:?})"));
                     if mode == TurnOffMode::Windows {
@@ -291,7 +310,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                     }
                     if matches!(mode, TurnOffMode::Ddc | TurnOffMode::Both) {
                         for s in slots.values_mut().filter(|s| s.active) {
-                            s.power = true;
+                            s.power = Some(false);
                         }
                     }
                 }
@@ -335,7 +354,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                             slot.refresh = None;
                             slot.throttle.pending.clear();
                             slot.capabilities = false;
-                            slot.power = false;
+                            slot.power = None;
                         }
                     }
                     for target in targets.iter() {
@@ -353,7 +372,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                                 throttle: Throttle::default(),
                                 refresh: None,
                                 capabilities: false,
-                                power: false,
+                                power: None,
                                 awaiting_probe: false,
                                 active: true,
                             }
@@ -384,6 +403,36 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 }
             }
         }
+        // Safety net: with every display switched off there is nothing left
+        // to click, so the next input switches them all back on.
+        let all_off = slots.values().any(|s| s.active)
+            && slots
+                .values()
+                .filter(|s| s.active)
+                .all(|s| s.monitor.powered_off);
+        if all_off {
+            let tick = events::last_input_tick();
+            match all_off_since {
+                None => all_off_since = Some((tick, Instant::now())),
+                Some((seen, since))
+                    if tick != seen && since.elapsed() >= Duration::from_millis(1000) =>
+                {
+                    log("Input while every display is off; switching them back on");
+                    for s in slots.values_mut().filter(|s| s.active) {
+                        s.power = Some(true);
+                    }
+                    all_off_since = None;
+                }
+                Some((_, since)) if since.elapsed() < Duration::from_millis(1000) => {
+                    // Input during the grace period (releasing the click
+                    // that switched them off) does not count.
+                    all_off_since = Some((tick, since));
+                }
+                Some(_) => {}
+            }
+        } else {
+            all_off_since = None;
+        }
         for slot in slots.values_mut() {
             if slot.busy.is_some() {
                 if slot.expire(Instant::now()) && slot.active {
@@ -398,9 +447,8 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 (Work::Probe(target, targets), Duration::from_secs(15))
             } else if let Some((level, p)) = slot.throttle.take(epoch.elapsed(), throttle) {
                 (Work::Write(level, p), Duration::from_secs(3))
-            } else if slot.power && slot.monitor.supports_ddc_power {
-                slot.power = false;
-                (Work::Power, Duration::from_secs(3))
+            } else if let Some(on) = slot.power.take() {
+                (Work::Power(on), Duration::from_secs(3))
             } else if slot.capabilities {
                 slot.capabilities = false;
                 (Work::Capabilities, Duration::from_secs(15))
@@ -468,6 +516,7 @@ mod tests {
                 brightness: None,
                 sdr: None,
                 supports_ddc_power: false,
+                powered_off: false,
                 unresponsive: false,
             },
             sender,
@@ -475,7 +524,7 @@ mod tests {
             throttle: Throttle::default(),
             refresh: None,
             capabilities: false,
-            power: false,
+            power: None,
             awaiting_probe: true,
             active: true,
         }

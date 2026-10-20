@@ -412,6 +412,7 @@ mod tests {
             brightness: Some(50),
             sdr: None,
             supports_ddc_power: false,
+            powered_off: false,
             unresponsive: false,
         }
     }

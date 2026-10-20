@@ -13,7 +13,7 @@ use std::{
 use gpui::{
     AnyElement, App, Bounds, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement, Styled, Window, canvas, div, point, px, relative,
+    StatefulInteractiveElement, Styled, Window, canvas, div, px, relative,
 };
 
 use super::{fx, theme::Palette};
@@ -141,14 +141,10 @@ pub(crate) fn slider(spec: SliderSpec<'_>, fx: &mut fx::Fx) -> AnyElement {
                         .size(px(THUMB))
                         .rounded_full()
                         .bg(palette.control_solid)
+                        // ControlElevationBorder: a faint light edge, no
+                        // drop shadow, like WinUI's Slider thumb.
                         .border_1()
-                        .border_color(palette.card_stroke)
-                        .shadow(vec![gpui::BoxShadow {
-                            color: gpui::hsla(0.0, 0.0, 0.0, if palette.dark { 0.4 } else { 0.18 }),
-                            offset: point(px(0.0), px(1.0)),
-                            blur_radius: px(2.0),
-                            spread_radius: px(0.0),
-                        }])
+                        .border_color(palette.control_elevation_border)
                         .flex()
                         .items_center()
                         .justify_center()

@@ -148,6 +148,18 @@ impl Drop for Events {
         }
     }
 }
+/// Tick count of the last keyboard or mouse input in this session.
+pub(super) fn last_input_tick() -> u32 {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    let mut info = LASTINPUTINFO {
+        cbSize: size_of::<LASTINPUTINFO>() as u32,
+        dwTime: 0,
+    };
+    // SAFETY: `info` is a properly sized LASTINPUTINFO owned by this frame.
+    unsafe { GetLastInputInfo(&mut info) };
+    info.dwTime
+}
+
 pub(super) fn turn_off() {
     unsafe {
         let _ = PostMessageW(

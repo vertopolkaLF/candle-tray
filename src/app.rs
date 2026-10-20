@@ -9,9 +9,7 @@ use std::time::{Duration, Instant};
 use gpui::Context;
 
 use crate::levels;
-use crate::monitors::{
-    Command, Event, LevelTarget, Monitor, MonitorService, SnapshotReason, TurnOffMode,
-};
+use crate::monitors::{Command, Event, LevelTarget, Monitor, MonitorService, SnapshotReason};
 use crate::settings::{MonitorSettings, Settings};
 use crate::twinkle_import::PendingImport;
 
@@ -325,9 +323,16 @@ impl AppModel {
         self.edit(cx, |settings| settings.link_levels = !settings.link_levels);
     }
 
-    pub fn turn_off_displays(&self) {
-        let mode: TurnOffMode = self.settings.turn_off.into();
-        self.service.send(Command::TurnOff(mode));
+    /// Switch one display on or off through DDC/CI.
+    pub fn set_power(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+        if let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) {
+            monitor.powered_off = !on;
+        }
+        self.service.send(Command::SetPower {
+            id: id.to_owned(),
+            on,
+        });
+        cx.notify();
     }
 
     pub fn refresh(&self) {
@@ -470,6 +475,7 @@ mod tests {
             brightness,
             sdr: sdr.map(|percent| SdrLevel { percent }),
             supports_ddc_power: false,
+            powered_off: false,
             unresponsive: false,
         }
     }

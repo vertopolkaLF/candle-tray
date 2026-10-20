@@ -25,7 +25,7 @@ use super::{
     theme::{self, HslaExt, Palette},
 };
 use crate::app::{AppModel, MonitorRow};
-use crate::monitors::MonitorKind;
+use crate::monitors::{BrightnessBackend, MonitorKind};
 
 /// Fluent motion tokens used by Windows edge panels.
 const OPEN_ANIMATION: Duration = Duration::from_millis(250);
@@ -1061,6 +1061,7 @@ impl PopupRoot {
         title: String,
         trailing: Option<String>,
         caption: Option<(String, gpui::Hsla)>,
+        action: Option<AnyElement>,
     ) -> gpui::Div {
         let palette = &self.palette;
         let mut text = div().flex().flex_col().flex_1().min_w_0().child(
@@ -1100,7 +1101,7 @@ impl PopupRoot {
                     .child(SharedString::from(trailing)),
             );
         }
-        header
+        header.children(action)
     }
 
     fn slider_row(
@@ -1153,6 +1154,7 @@ impl PopupRoot {
             crate::i18n::tr("popup-all-displays").to_owned(),
             Some(format!("{value}")),
             Some((names, self.palette.text_secondary)),
+            None,
         );
         let slider = self.slider_row(
             "all-displays".into(),
@@ -1178,7 +1180,13 @@ impl PopupRoot {
             MonitorKind::External => "fluent-desktop",
         };
         let unresponsive = row.monitor.unresponsive;
-        let caption = if unresponsive {
+        let off = row.monitor.powered_off;
+        let caption = if off {
+            Some((
+                crate::i18n::tr("popup-powered-off").to_owned(),
+                palette.text_tertiary,
+            ))
+        } else if unresponsive {
             Some((
                 crate::i18n::tr("popup-unresponsive").to_owned(),
                 palette.caution,
@@ -1195,10 +1203,14 @@ impl PopupRoot {
             row.slider
                 .map_or_else(|| "–".to_owned(), |value| value.to_string())
         });
+        let power = matches!(row.monitor.backend, BrightnessBackend::Ddc { .. })
+            .then(|| self.power_button(&row.monitor.id, off, cx));
+        let enabled = !unresponsive && !off;
+        let header = self.card_header(icon_name, row.name.clone(), trailing, caption, power);
         let mut card = self
             .card()
             .when(unresponsive, |card| card.opacity(0.7))
-            .child(self.card_header(icon_name, row.name.clone(), trailing, caption));
+            .child(header);
         if !sdr_only && let Some(value) = row.slider {
             let model = self.model.clone();
             let id = row.monitor.id.clone();
@@ -1209,7 +1221,7 @@ impl PopupRoot {
                 format!("brightness-{}", row.monitor.id),
                 "fluent-sun-low",
                 value,
-                !unresponsive,
+                enabled,
                 on_change,
                 cx,
             ));
@@ -1237,7 +1249,7 @@ impl PopupRoot {
                     format!("sdr-{}", row.monitor.id),
                     "fluent-brightness",
                     sdr.percent,
-                    !unresponsive,
+                    enabled,
                     on_change,
                     cx,
                 ));
@@ -1270,17 +1282,6 @@ impl PopupRoot {
                 cx,
             )
         });
-        let off_model = self.model.clone();
-        let power = self.footer_button(
-            "turn-off",
-            "fluent-power",
-            false,
-            move |_, _, cx| {
-                crate::popup::hide();
-                off_model.read(cx).turn_off_displays();
-            },
-            cx,
-        );
         let settings = self.footer_button(
             "settings",
             "fluent-settings",
@@ -1310,7 +1311,6 @@ impl PopupRoot {
                     .child(SharedString::from(crate::i18n::tr("app-name").to_owned())),
             )
             .children(link)
-            .child(power)
             .child(settings);
         // By a top taskbar the bar caps the capsule instead of closing it.
         let bar = if self.host.placement.top {
@@ -1319,6 +1319,51 @@ impl PopupRoot {
             bar.border_t_1().rounded_b(corner)
         };
         bar.into_any_element()
+    }
+
+    /// DDC/CI power toggle in a display's card header.
+    fn power_button(&mut self, id: &str, off: bool, cx: &mut Context<Self>) -> AnyElement {
+        let palette = self.palette.clone();
+        let hover_id = fx::key(("power", id));
+        let hovered = self.hovered(hover_id);
+        let hover = self
+            .fx
+            .toggle(fx::key(("power-hover", id)), hovered, fx::FASTER);
+        let emphasis = self
+            .fx
+            .toggle(fx::key(("power-emphasis", id)), hovered || off, fx::FAST);
+        let model = self.model.clone();
+        let target = id.to_owned();
+        let mut element = div()
+            .id(eid(format!("power-{id}")))
+            .relative()
+            .flex_none()
+            .size(px(28.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(palette.control_radius))
+            .on_hover(self.hover_listener(hover_id, cx))
+            .on_click(move |_, _, cx| {
+                let target = target.clone();
+                model.update(cx, |model, cx| model.set_power(&target, off, cx));
+            });
+        if hover > 0.001 {
+            element = element.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(palette.control_radius))
+                    .bg(palette.subtle_fill.opacity(hover)),
+            );
+        }
+        element
+            .child(icon(
+                "fluent-power",
+                16.0,
+                palette.text_secondary.mix(palette.accent, emphasis),
+            ))
+            .into_any_element()
     }
 
     fn footer_button(

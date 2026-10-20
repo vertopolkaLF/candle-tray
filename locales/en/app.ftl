@@ -74,3 +74,5 @@ monitors-backend-unsupported = Not controllable
 monitors-kind-internal = Built-in
 monitors-kind-external = External
 monitors-footnote = Settings for disconnected displays are kept and apply again when they reconnect.
+popup-powered-off = Turned off
+popup-power = Turn display on or off

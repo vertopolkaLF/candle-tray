@@ -63,6 +63,8 @@ pub(crate) struct Palette {
     pub(crate) control_strong_fill: Hsla,
     /// Slider thumb outer disc (`ControlSolidFillColorDefault`).
     pub(crate) control_solid: Hsla,
+    /// Thumb edge (`ControlElevationBorderBrush`).
+    pub(crate) control_elevation_border: Hsla,
     pub(crate) divider: Hsla,
     pub(crate) solid_background: Hsla,
     pub(crate) footer_background: Hsla,
@@ -176,6 +178,11 @@ impl Palette {
                 rgba8(0x45, 0x45, 0x45, 0xFF)
             } else {
                 rgba8(0xFF, 0xFF, 0xFF, 0xFF)
+            },
+            control_elevation_border: if dark {
+                rgba8(255, 255, 255, 0x17)
+            } else {
+                rgba8(0, 0, 0, 0x1A)
             },
             // DividerStrokeColorDefault.
             divider: ink(dark, if dark { 0x15 } else { 0x0F }),
