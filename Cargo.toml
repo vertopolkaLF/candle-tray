@@ -22,6 +22,7 @@ futures = "0.3"
 raw-window-handle = "0.6"
 resvg = { version = "0.45", default-features = false }
 smallvec = "1"
+unicode-segmentation = "1"
 fluent-bundle = "0.16"
 unic-langid = "0.9"
 

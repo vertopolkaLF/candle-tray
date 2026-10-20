@@ -9,6 +9,10 @@ pub(crate) mod assets;
 mod backdrop;
 #[cfg(windows)]
 mod blur_effect;
+#[allow(dead_code)]
+pub(crate) mod components;
+#[allow(dead_code)]
+pub(crate) mod controls;
 // Minibar's motion toolkit, kept whole so ported UI code keeps working.
 #[allow(dead_code)]
 pub(crate) mod fx;
@@ -155,6 +159,7 @@ fn run(
         .with_assets(assets::PopupAssets)
         .run(move |cx| {
             let model = init(cx);
+            crate::settings_window::init(cx);
             let default_font = theme::default_font_family(cx);
             // The tray starts hidden. Do not allocate large swap-chain/MSAA
             // surfaces before the user has even opened the popup.

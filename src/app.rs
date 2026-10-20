@@ -128,6 +128,13 @@ impl AppModel {
 
     /// Visible displays in the user's order.
     pub fn rows(&self) -> Vec<MonitorRow> {
+        let mut rows = self.all_rows();
+        rows.retain(|row| !row.settings.hidden);
+        rows
+    }
+
+    /// Every connected display in the user's order, hidden ones included.
+    pub fn all_rows(&self) -> Vec<MonitorRow> {
         let mut rows: Vec<MonitorRow> = self
             .monitors
             .iter()
@@ -148,7 +155,6 @@ impl AppModel {
                     slider,
                 }
             })
-            .filter(|row| !row.settings.hidden)
             .collect();
         let order = &self.settings.order;
         rows.sort_by_key(|row| {
@@ -272,6 +278,31 @@ impl AppModel {
         self.save();
         cx.notify();
         report.monitors
+    }
+
+    /// Move a display `delta` places in the user's order.
+    pub fn move_monitor(&mut self, id: &str, delta: isize, cx: &mut Context<Self>) {
+        let mut ids: Vec<String> = self
+            .all_rows()
+            .into_iter()
+            .map(|row| row.monitor.id)
+            .collect();
+        // Keep the place of displays that are remembered but disconnected.
+        for known in &self.settings.order {
+            if !ids.contains(known) {
+                ids.push(known.clone());
+            }
+        }
+        let Some(from) = ids.iter().position(|known| known == id) else {
+            return;
+        };
+        let to = (from as isize + delta).clamp(0, ids.len() as isize - 1) as usize;
+        if to == from {
+            return;
+        }
+        let moved = ids.remove(from);
+        ids.insert(to, moved);
+        self.edit(cx, move |settings| settings.order = ids);
     }
 
     pub fn toggle_link_levels(&mut self, cx: &mut Context<Self>) {

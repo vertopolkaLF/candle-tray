@@ -42,6 +42,28 @@ fn source(name: &str) -> Option<&'static str> {
         "fluent-brightness" => {
             include_str!("../../../assets/icons/fluent-brightness-high-20-regular.svg")
         }
+        // Phosphor glyphs used by the Settings window, keyed by file stem.
+        "check-bold" => include_str!("../../../assets/icons/ph-check-bold.svg"),
+        "check-circle-fill" => include_str!("../../../assets/icons/ph-check-circle-fill.svg"),
+        "dots-three-bold" => include_str!("../../../assets/icons/ph-dots-three-bold.svg"),
+        "info-fill" => include_str!("../../../assets/icons/ph-info-fill.svg"),
+        "plus-bold" => include_str!("../../../assets/icons/ph-plus-bold.svg"),
+        "x-circle-fill" => include_str!("../../../assets/icons/ph-x-circle-fill.svg"),
+        "caret-down-bold" => include_str!("../../../assets/icons/ph-caret-down-bold.svg"),
+        "magnifying-glass-bold" => {
+            include_str!("../../../assets/icons/ph-magnifying-glass-bold.svg")
+        }
+        "warning-fill" => include_str!("../../../assets/icons/ph-warning-fill.svg"),
+        "desktop-fill" => include_str!("../../../assets/icons/ph-desktop-fill.svg"),
+        "gear-six-fill" => include_str!("../../../assets/icons/ph-gear-six-fill.svg"),
+        "monitor-fill" => include_str!("../../../assets/icons/ph-monitor-fill.svg"),
+        "laptop-fill" => include_str!("../../../assets/icons/ph-laptop-fill.svg"),
+        "arrow-counter-clockwise-bold" => {
+            include_str!("../../../assets/icons/ph-arrow-counter-clockwise-bold.svg")
+        }
+        "dots-six-vertical-bold" => {
+            include_str!("../../../assets/icons/ph-dots-six-vertical-bold.svg")
+        }
         _ => return None,
     })
 }
@@ -103,6 +125,11 @@ pub(crate) fn normalize_svg(svg: &str) -> String {
 
 impl AssetSource for PopupAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        if path == "color/app-icon.png" {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../../assets/app-icon.png"
+            ))));
+        }
         let Some(name) = path
             .strip_prefix("icons/")
             .and_then(|rest| rest.strip_suffix(".svg"))
