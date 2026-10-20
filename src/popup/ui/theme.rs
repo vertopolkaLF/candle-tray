@@ -94,7 +94,7 @@ impl Palette {
             PopupMaterial::Acrylic => {}
         }
         let opacity = if frosted {
-            0.25
+            if self.dark { 0.15 } else { 0.25 }
         } else if self.dark {
             0.94
         } else {
@@ -104,12 +104,12 @@ impl Palette {
     }
 
     /// Lightness source of the Mica/Acrylic backdrop: the Fluent base
-    /// (#202020 dark, near-white light). Dark acrylic uses the lighter WinUI
-    /// acrylic base (#2C2C2C) so the wallpaper glows through like system
-    /// flyouts.
+    /// (#202020 dark, near-white light). Dark acrylic is lifted well above
+    /// the WinUI base: measured against Twinkle Tray's flyout, #2C2C2C still
+    /// rendered near #202020 once the tint was composited.
     pub(crate) fn backdrop_luminosity(&self) -> (u8, u8, u8) {
         let level = match (self.dark, self.material) {
-            (true, PopupMaterial::Acrylic) => 44,
+            (true, PopupMaterial::Acrylic) => 66,
             (true, _) => 32,
             (false, _) => 245,
         };
