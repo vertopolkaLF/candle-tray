@@ -938,11 +938,14 @@ impl PopupRoot {
                 .map(|row| row.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            body.push(self.render_linked_card(average as u8, names, inner_width, cx));
-            for row in rows
+            let contrasts: Vec<u32> = rows
                 .iter()
-                .filter(|row| row.monitor.sdr.is_some() || row.contrast().is_some())
-            {
+                .filter_map(|row| row.contrast().map(u32::from))
+                .collect();
+            let contrast = (!contrasts.is_empty())
+                .then(|| (contrasts.iter().sum::<u32>() / contrasts.len() as u32) as u8);
+            body.push(self.render_linked_card(average as u8, contrast, names, inner_width, cx));
+            for row in rows.iter().filter(|row| row.monitor.sdr.is_some()) {
                 body.push(self.render_monitor_card(row, true, inner_width, cx));
             }
         } else {
@@ -1154,6 +1157,7 @@ impl PopupRoot {
     fn render_linked_card(
         &mut self,
         value: u8,
+        contrast: Option<u8>,
         names: String,
         _inner_width: f32,
         cx: &mut Context<Self>,
@@ -1177,7 +1181,25 @@ impl PopupRoot {
             on_change,
             cx,
         );
-        self.card().child(header).child(slider).into_any_element()
+        let contrast = contrast.map(|contrast| {
+            let model = self.model.clone();
+            let on_change: slider::Handler = Rc::new(move |value, _, cx| {
+                model.update(cx, |model, cx| model.set_contrast_all(value, cx));
+            });
+            self.slider_row(
+                "all-displays-contrast".into(),
+                "fluent-contrast",
+                contrast,
+                true,
+                on_change,
+                cx,
+            )
+        });
+        self.card()
+            .child(header)
+            .child(slider)
+            .children(contrast)
+            .into_any_element()
     }
 
     fn render_monitor_card(
@@ -1234,7 +1256,7 @@ impl PopupRoot {
                 cx,
             ));
         }
-        if let Some(contrast) = row.contrast() {
+        if !sdr_only && let Some(contrast) = row.contrast() {
             let model = self.model.clone();
             let id = row.monitor.id.clone();
             let on_change: slider::Handler = Rc::new(move |value, _, cx| {

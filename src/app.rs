@@ -276,6 +276,27 @@ impl AppModel {
     }
 
     pub fn set_contrast(&mut self, id: &str, percent: u8, cx: &mut Context<Self>) {
+        self.apply_contrast(id, percent);
+        self.save();
+        cx.notify();
+    }
+
+    /// The linked contrast slider: every visible display showing contrast.
+    pub fn set_contrast_all(&mut self, percent: u8, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self
+            .rows()
+            .into_iter()
+            .filter(|row| row.contrast().is_some() && !row.monitor.unresponsive)
+            .map(|row| row.monitor.id)
+            .collect();
+        for id in ids {
+            self.apply_contrast(&id, percent);
+        }
+        self.save();
+        cx.notify();
+    }
+
+    fn apply_contrast(&mut self, id: &str, percent: u8) {
         let percent = percent.min(100);
         self.settings
             .monitors
@@ -290,8 +311,6 @@ impl AppModel {
             id: id.to_owned(),
             percent,
         });
-        self.save();
-        cx.notify();
     }
 
     /// Offer a one-time Twinkle Tray import (first run only).
