@@ -24,8 +24,9 @@ use crate::settings::TrayIcon;
 
 static MENU_DIRTY: AtomicBool = AtomicBool::new(false);
 static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
-/// Primary display brightness for the tooltip; 255 = unknown.
-static TOOLTIP_LEVEL: AtomicU8 = AtomicU8::new(255);
+/// Display levels for the tooltip, `(name, level)` in the user's order.
+static TOOLTIP: std::sync::Mutex<Vec<(String, u8)>> = std::sync::Mutex::new(Vec::new());
+static TOOLTIP_DIRTY: AtomicBool = AtomicBool::new(true);
 /// Index into [`TrayIcon::ALL`] of the glyph to show.
 static ICON: AtomicU8 = AtomicU8::new(0);
 /// Win32 id of the thread running [`run`]; 0 before it starts.
@@ -47,10 +48,41 @@ pub fn refresh_menu() {
     wake();
 }
 
-/// Publish the primary display brightness shown in the tooltip.
-pub fn set_tooltip_level(level: Option<u8>) {
-    TOOLTIP_LEVEL.store(level.unwrap_or(255), Ordering::SeqCst);
-    wake();
+/// Publish the display levels the tooltip lists.
+pub fn set_tooltip_levels(levels: Vec<(String, u8)>) {
+    let mut current = TOOLTIP.lock().unwrap_or_else(|e| e.into_inner());
+    if *current != levels {
+        *current = levels;
+        TOOLTIP_DIRTY.store(true, Ordering::SeqCst);
+        wake();
+    }
+}
+
+/// Windows cuts notification icon tips at 127 characters.
+const TOOLTIP_MAX: usize = 127;
+
+/// `Candle Tray — 50%` for one display; one line per display otherwise.
+fn tooltip_text(levels: &[(String, u8)]) -> String {
+    let text = match levels {
+        [] => crate::i18n::tr("app-name").to_owned(),
+        [(_, level)] => crate::i18n::format("tray-tooltip", &[("percent", level.to_string())]),
+        levels => {
+            let mut text = crate::i18n::tr("app-name").to_owned();
+            for (name, level) in levels {
+                text.push_str(&format!(
+                    "
+{name}: {level}%"
+                ));
+            }
+            text
+        }
+    };
+    if text.chars().count() <= TOOLTIP_MAX {
+        return text;
+    }
+    let mut cut: String = text.chars().take(TOOLTIP_MAX - 1).collect();
+    cut.push('…');
+    cut
 }
 
 /// Switch the tray glyph.
@@ -119,7 +151,6 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
         .with_menu_on_left_click(false)
         .build()
         .context("create tray icon")?;
-    let mut tooltip_level = u8::MAX - 1;
     let mut next_theme_check = Instant::now();
     TRAY_THREAD.store(current_thread_id(), Ordering::SeqCst);
     // Registered from this thread so WM_HOTKEY reaches its message pump.
@@ -221,16 +252,10 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
                 Ok(menu) => tray.set_menu(Some(Box::new(menu))),
                 Err(error) => crate::logger::error(format!("{error:#}")),
             }
-            tooltip_level = u8::MAX - 1;
+            TOOLTIP_DIRTY.store(true, Ordering::SeqCst);
         }
-        let level = TOOLTIP_LEVEL.load(Ordering::SeqCst);
-        if level != tooltip_level {
-            tooltip_level = level;
-            let text = if level <= 100 {
-                crate::i18n::format("tray-tooltip", &[("percent", level.to_string())])
-            } else {
-                crate::i18n::tr("app-name").to_owned()
-            };
+        if TOOLTIP_DIRTY.swap(false, Ordering::SeqCst) {
+            let text = tooltip_text(&TOOLTIP.lock().unwrap_or_else(|e| e.into_inner()));
             let _ = tray.set_tooltip(Some(text));
         }
         let now_glyph = current_icon();

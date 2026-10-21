@@ -13,7 +13,13 @@ by Xander Frangos. Candle Tray is licensed under the MIT license.
   turning displays off. Scrolling over the tray icon changes brightness.
 - A time-of-day schedule (clock times, sunrise and sunset) with smooth
   transitions, and dimming after a period without input.
-- Input source switching for DDC/CI displays (VCP 0x60).
+- Input source switching for DDC/CI displays (VCP 0x60), with custom input
+  names.
+- Profiles applied automatically while an app is in front, or when the
+  computer switches between battery and mains power.
+- Adaptive brightness from an ambient light sensor.
+- A per-display brightness VCP code for displays that use a vendor code.
+- Command-line control for scripts (see below).
 - General and per-monitor settings that apply live.
 - Twinkle Tray settings import.
 - English and Russian interfaces.

@@ -307,12 +307,13 @@ impl AppModel {
         rows
     }
 
-    /// Slider level of the primary display (the one at the desktop origin).
-    pub fn primary_level(&self) -> Option<u8> {
-        self.all_rows()
+    /// Name and level of every visible display with a level, for the tray
+    /// tooltip.
+    pub fn tooltip_levels(&self) -> Vec<(String, u8)> {
+        self.rows()
             .into_iter()
-            .find(|row| row.monitor.bounds.is_some_and(|b| b.x == 0 && b.y == 0))
-            .and_then(|row| row.slider)
+            .filter_map(|row| Some((row.name, row.slider?)))
+            .collect()
     }
 
     // ----- actions -----------------------------------------------------------
