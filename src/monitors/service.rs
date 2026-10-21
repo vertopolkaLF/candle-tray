@@ -55,6 +55,8 @@ enum Work {
     /// VCP 0xD6: `true` = on (1), `false` = DPM off (4). DPM off keeps the
     /// monitor listening on DDC/CI, so it can be switched back on.
     Power(bool),
+    /// Switch HDR on or off.
+    Hdr(bool),
 }
 struct Reply {
     id: String,
@@ -74,6 +76,8 @@ struct Slot {
     capabilities: bool,
     /// Requested DDC power state, not yet written.
     power: Option<bool>,
+    /// Requested HDR state, not yet written.
+    hdr: Option<bool>,
     /// Levels should be re-read once pending writes have landed.
     read: bool,
     awaiting_probe: bool,
@@ -87,6 +91,7 @@ impl Slot {
             && self.refresh.is_none()
             && !self.capabilities
             && self.power.is_none()
+            && self.hdr.is_none()
             && !self.read
     }
     fn expire(&mut self, now: Instant) -> bool {
@@ -173,6 +178,7 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                     }
                     ddc
                 };
+                target.monitor.hdr_supported = hdr::supported(&target);
                 target.monitor.sdr = hdr::read(&target);
                 state = Some(Handles {
                     target,
@@ -227,6 +233,15 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                             h.target.monitor.powered_off = !on;
                         }
                         _ => log(format!("DDC power failed: {}", h.target.monitor.id)),
+                    }
+                }
+            }
+            Work::Hdr(on) => {
+                if let Some(h) = &mut state {
+                    if hdr::enable(&h.target, on) {
+                        h.target.monitor.sdr = hdr::read(&h.target);
+                    } else {
+                        log(format!("HDR switch failed: {}", h.target.monitor.id));
                     }
                 }
             }
@@ -370,6 +385,12 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                         s.throttle.set(Level::Contrast, percent);
                     }
                 }
+                Ok(Command::SetHdr { id, on }) => {
+                    log(format!("Setting HDR of {id} to {on}"));
+                    if let Some(s) = slots.get_mut(&id).filter(|s| s.active) {
+                        s.hdr = Some(on);
+                    }
+                }
                 Ok(Command::Apply(targets)) => {
                     for t in targets {
                         if let Some(s) = slots.get_mut(&t.id).filter(|s| s.active) {
@@ -448,6 +469,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                             slot.throttle.pending.clear();
                             slot.capabilities = false;
                             slot.power = None;
+                            slot.hdr = None;
                             slot.read = false;
                         }
                     }
@@ -467,6 +489,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                                 refresh: None,
                                 capabilities: false,
                                 power: None,
+                                hdr: None,
                                 read: false,
                                 awaiting_probe: false,
                                 active: true,
@@ -545,6 +568,8 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 (Work::Write(level, p), Duration::from_secs(3))
             } else if let Some(on) = slot.power.take() {
                 (Work::Power(on), Duration::from_secs(3))
+            } else if let Some(on) = slot.hdr.take() {
+                (Work::Hdr(on), Duration::from_secs(5))
             } else if slot.read && slot.throttle.pending.is_empty() {
                 // After pending writes, so the read reports what they set.
                 slot.read = false;
@@ -615,6 +640,7 @@ mod tests {
                 backend: BrightnessBackend::Unsupported,
                 brightness: None,
                 sdr: None,
+                hdr_supported: false,
                 contrast: None,
                 supports_ddc_power: false,
                 powered_off: false,
@@ -626,6 +652,7 @@ mod tests {
             refresh: None,
             capabilities: false,
             power: None,
+            hdr: None,
             read: false,
             awaiting_probe: true,
             active: true,

@@ -412,6 +412,7 @@ mod tests {
             brightness: Some(50),
             sdr: None,
             contrast: None,
+            hdr_supported: false,
             supports_ddc_power: false,
             powered_off: false,
             unresponsive: false,

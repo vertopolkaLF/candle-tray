@@ -92,6 +92,8 @@ pub struct Monitor {
     pub brightness: Option<u8>,
     /// Present only while HDR (advanced color) is active on the display.
     pub sdr: Option<SdrLevel>,
+    /// The display can switch HDR on (it may be off right now).
+    pub hdr_supported: bool,
     /// Current DDC/CI contrast percent (VCP 0x12), `None` when the display
     /// does not answer it.
     pub contrast: Option<u8>,
@@ -141,6 +143,11 @@ pub enum Command {
     SetContrast {
         id: MonitorId,
         percent: u8,
+    },
+    /// Switch HDR on or off. The display then re-reports its SDR level.
+    SetHdr {
+        id: MonitorId,
+        on: bool,
     },
     /// Write several levels at once (restore after startup/resume/display
     /// change). Same coalescing as the single setters.

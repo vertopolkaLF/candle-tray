@@ -391,6 +391,14 @@ impl AppModel {
         cx.notify();
     }
 
+    /// Switch HDR on or off for one display.
+    pub fn set_hdr(&mut self, id: &str, on: bool) {
+        self.service.send(Command::SetHdr {
+            id: id.to_owned(),
+            on,
+        });
+    }
+
     // ----- profiles ---------------------------------------------------------
 
     /// Current levels of every visible display, as a profile would save them.
@@ -788,6 +796,7 @@ mod tests {
             brightness,
             sdr: sdr.map(|percent| SdrLevel { percent }),
             contrast: None,
+            hdr_supported: false,
             supports_ddc_power: false,
             powered_off: false,
             unresponsive: false,

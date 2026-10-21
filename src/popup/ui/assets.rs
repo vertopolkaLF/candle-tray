@@ -38,6 +38,7 @@ fn source(name: &str) -> Option<&'static str> {
     Some(match name {
         "fluent-settings" => include_str!("../../../assets/icons/fluent-settings-20-filled.svg"),
         "fluent-power" => include_str!("../../../assets/icons/fluent-power-20-filled.svg"),
+        "fluent-hdr" => include_str!("../../../assets/icons/fluent-hdr-20-regular.svg"),
         "fluent-refresh" => include_str!("../../../assets/icons/fluent-arrow-sync-20-filled.svg"),
         "fluent-chevron-down" => {
             include_str!("../../../assets/icons/fluent-chevron-down-16-regular.svg")

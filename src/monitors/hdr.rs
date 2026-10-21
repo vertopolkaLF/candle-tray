@@ -14,6 +14,13 @@ struct ColorInfo2 {
     bits: u32,
     mode: u32,
 }
+/// `DISPLAYCONFIG_SET_HDR_STATE` (Windows 11 24H2+) and
+/// `DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE`: one flag in bit 0.
+#[repr(C)]
+struct SetFlag {
+    header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    value: u32,
+}
 #[repr(C)]
 struct SetWhite {
     header: DISPLAYCONFIG_DEVICE_INFO_HEADER,
@@ -21,7 +28,15 @@ struct SetWhite {
     final_value: u8,
 }
 
-pub(super) fn read(target: &Target) -> Option<SdrLevel> {
+/// Advanced color state of a display.
+struct ColorState {
+    /// `DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2` answered (Windows 11 24H2+),
+    /// which tells HDR apart from WCG/ACM.
+    modern: bool,
+    supported: bool,
+    active: bool,
+}
+fn color_state(target: &Target) -> ColorState {
     unsafe {
         let mut info = ColorInfo2 {
             header: header::<ColorInfo2>(
@@ -31,23 +46,57 @@ pub(super) fn read(target: &Target) -> Option<SdrLevel> {
             ),
             ..Default::default()
         };
-        let modern = DisplayConfigGetDeviceInfo(&mut info.header) == 0;
-        let active = if modern {
-            info.mode == 2
-        } else {
-            let mut old = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
-                header: header::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>(
-                    DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
-                    target.adapter,
-                    target.target,
-                ),
-                ..Default::default()
+        if DisplayConfigGetDeviceInfo(&mut info.header) == 0 {
+            return ColorState {
+                modern: true,
+                // highDynamicRangeSupported
+                supported: info.flags & (1 << 4) != 0,
+                active: info.mode == 2,
             };
-            DisplayConfigGetDeviceInfo(&mut old.header) == 0 && old.Anonymous.value & 2 != 0
-        };
-        if !active {
-            return None;
         }
+        let mut old = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
+            header: header::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>(
+                DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
+                target.adapter,
+                target.target,
+            ),
+            ..Default::default()
+        };
+        let ok = DisplayConfigGetDeviceInfo(&mut old.header) == 0;
+        let value = old.Anonymous.value;
+        ColorState {
+            modern: false,
+            // advancedColorSupported, advancedColorEnabled
+            supported: ok && value & 1 != 0,
+            active: ok && value & 2 != 0,
+        }
+    }
+}
+/// The display can switch HDR on.
+pub(super) fn supported(target: &Target) -> bool {
+    color_state(target).supported
+}
+/// Switch HDR on or off, like the toggle in Windows display settings.
+pub(super) fn enable(target: &Target, on: bool) -> bool {
+    // SET_HDR_STATE leaves ACM alone; older Windows only has the advanced
+    // color switch.
+    let kind = if color_state(target).modern { 16 } else { 10 };
+    let params = SetFlag {
+        header: header::<SetFlag>(
+            DISPLAYCONFIG_DEVICE_INFO_TYPE(kind),
+            target.adapter,
+            target.target,
+        ),
+        value: u32::from(on),
+    };
+    unsafe { DisplayConfigSetDeviceInfo(&params.header) == 0 }
+}
+pub(super) fn read(target: &Target) -> Option<SdrLevel> {
+    let ColorState { modern, active, .. } = color_state(target);
+    if !active {
+        return None;
+    }
+    unsafe {
         let mut white = DISPLAYCONFIG_SDR_WHITE_LEVEL {
             header: header::<DISPLAYCONFIG_SDR_WHITE_LEVEL>(
                 DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL,

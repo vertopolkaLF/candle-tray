@@ -4,7 +4,7 @@ Rust + GPUI rewrite of Twinkle Tray (monitor brightness from the Windows tray). 
 
 - `src/` is the Rust app. `legacy/` is the old Electron app, kept only as a reference for hardware behavior (`legacy/src/Monitors.js`, `legacy/src/modules/node-ddcci/ddcci.cc`, `legacy/src/modules/windows-hdr/`, `legacy/src/modules/wmi-bridge/`, `legacy/src/monitor-rules.json`, `legacy/src/electron.js`). Never build or modify it.
 - The popup, tray, theme, backdrop and settings-window kit are ported from `C:\dev\codex-minibar` (same author). `vendor/gpui` is minibar's patched GPUI 0.2.2.
-- Features: brightness (DDC/CI, WMI), SDR white level for HDR displays, contrast (DDC/CI VCP 0x12, opt-in per display), link levels, turn off displays, restore levels, level profiles (popup bottom bar, global shortcuts), settings window (General, Monitors, Profiles), Twinkle Tray settings import, en + ru. The app is past MVP; new features are welcome when the user asks for them.
+- Features: brightness (DDC/CI, WMI), HDR on/off and SDR white level for HDR displays, contrast (DDC/CI VCP 0x12, opt-in per display), link levels, turn off displays, restore levels, level profiles (popup bottom bar, global shortcuts), settings window (General, Monitors, Profiles), Twinkle Tray settings import, en + ru. The app is past MVP; new features are welcome when the user asks for them.
 
 ## Building
 

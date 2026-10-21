@@ -1317,10 +1317,47 @@ impl PopupRoot {
             None
         };
         let trailing = off.then(|| crate::i18n::tr("popup-powered-off").to_owned());
-        let power = matches!(row.monitor.backend, BrightnessBackend::Ddc { .. })
-            .then(|| self.power_button(&row.monitor.id, off, cx));
+        let hdr = row.monitor.hdr_supported.then(|| {
+            let on = row.monitor.sdr.is_some();
+            let model = self.model.clone();
+            let target = row.monitor.id.clone();
+            self.header_button(
+                ("hdr", &row.monitor.id),
+                "fluent-hdr",
+                on,
+                move |_, _, cx| {
+                    let target = target.clone();
+                    model.update(cx, |model, _| model.set_hdr(&target, !on));
+                },
+                cx,
+            )
+        });
+        let power = matches!(row.monitor.backend, BrightnessBackend::Ddc { .. }).then(|| {
+            let model = self.model.clone();
+            let target = row.monitor.id.clone();
+            self.header_button(
+                ("power", &row.monitor.id),
+                "fluent-power",
+                off,
+                move |_, _, cx| {
+                    let target = target.clone();
+                    model.update(cx, |model, cx| model.set_power(&target, off, cx));
+                },
+                cx,
+            )
+        });
+        let actions = (hdr.is_some() || power.is_some()).then(|| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.0))
+                .children(hdr)
+                .children(power)
+                .into_any_element()
+        });
         let enabled = !unresponsive && !off;
-        let header = self.card_header(row.name.clone(), trailing, caption, power);
+        let header = self.card_header(row.name.clone(), trailing, caption, actions);
         let mut card = self
             .section()
             .when(unresponsive, |card| card.opacity(0.7))
@@ -1696,21 +1733,27 @@ impl PopupRoot {
         [scrim, menu.into_any_element()]
     }
 
-    /// DDC/CI power toggle in a display's card header.
-    fn power_button(&mut self, id: &str, off: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// Toggle in a display's card header (HDR, DDC/CI power), tinted with
+    /// the accent while `active`.
+    fn header_button(
+        &mut self,
+        (kind, id): (&str, &str),
+        glyph: &'static str,
+        active: bool,
+        on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let palette = self.palette.clone();
-        let hover_id = fx::key(("power", id));
+        let hover_id = fx::key((kind, id));
         let hovered = self.hovered(hover_id);
         let hover = self
             .fx
-            .toggle(fx::key(("power-hover", id)), hovered, fx::FASTER);
+            .toggle(fx::key((kind, "hover", id)), hovered, fx::FASTER);
         let emphasis = self
             .fx
-            .toggle(fx::key(("power-emphasis", id)), hovered || off, fx::FAST);
-        let model = self.model.clone();
-        let target = id.to_owned();
+            .toggle(fx::key((kind, "emphasis", id)), hovered || active, fx::FAST);
         let mut element = div()
-            .id(eid(format!("power-{id}")))
+            .id(eid(format!("{kind}-{id}")))
             .relative()
             .flex_none()
             .size(px(28.0))
@@ -1719,10 +1762,7 @@ impl PopupRoot {
             .justify_center()
             .rounded(px(palette.control_radius))
             .on_hover(self.hover_listener(hover_id, cx))
-            .on_click(move |_, _, cx| {
-                let target = target.clone();
-                model.update(cx, |model, cx| model.set_power(&target, off, cx));
-            });
+            .on_click(on_click);
         if hover > 0.001 {
             element = element.child(
                 div()
@@ -1734,7 +1774,7 @@ impl PopupRoot {
         }
         element
             .child(icon(
-                "fluent-power",
+                glyph,
                 16.0,
                 palette.text_secondary.mix(palette.accent, emphasis),
             ))

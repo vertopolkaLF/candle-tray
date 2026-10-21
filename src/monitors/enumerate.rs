@@ -128,6 +128,7 @@ pub(super) fn enumerate() -> windows::core::Result<Vec<Target>> {
                     brightness: None,
                     sdr: None,
                     contrast: None,
+                    hdr_supported: false,
                     supports_ddc_power: false,
                     powered_off: false,
                     unresponsive: false,
