@@ -39,6 +39,16 @@ pub enum PopupCommand {
     Shortcut(crate::hotkey::Action),
     /// The wheel turned over the tray icon, in notches (up is positive).
     TrayScroll(i32),
+    /// First eligible foreground application, then changes of executable name.
+    /// Fullscreen is a snapshot at that change, not a window resize event.
+    Foreground {
+        exe: String,
+        fullscreen: bool,
+    },
+    /// Initial known battery/AC state, then changes (machines with no battery are silent).
+    PowerSource {
+        on_battery: bool,
+    },
     /// Run on the GPUI thread with the app context (tray menu actions etc.).
     Run(Box<dyn FnOnce(&mut gpui::App) + Send>),
 }

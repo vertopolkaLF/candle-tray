@@ -124,13 +124,15 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
     TRAY_THREAD.store(current_thread_id(), Ordering::SeqCst);
     // Registered from this thread so WM_HOTKEY reaches its message pump.
     let mut hotkeys = crate::hotkey::Registration::default();
+    let mut watchers = crate::foreground::Registration::new()?;
     let mut wheel = WheelHook::default();
     loop {
-        // Idle, only the taskbar theme check needs a timer: every other
-        // input arrives as a window message or a `wake`.
+        // The theme and power-source checks share this timer; other inputs
+        // arrive as window messages or a `wake`.
         let active = popup::is_visible();
         popup::wait_for_messages(Duration::from_millis(if active { 16 } else { 1000 }));
         popup::pump_messages();
+        watchers.poll();
 
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
             match event {
@@ -183,6 +185,7 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
         if EXIT_REQUESTED.load(Ordering::SeqCst) {
             drop(wheel);
             drop(hotkeys);
+            drop(watchers);
             drop(tray);
             on_exit();
             return Ok(());
