@@ -22,6 +22,7 @@ by Xander Frangos. Candle Tray is licensed under the MIT license.
 - Command-line control for scripts (see below).
 - General and per-monitor settings that apply live.
 - Twinkle Tray settings import.
+- In-place updates from GitHub Releases.
 - English and Russian interfaces.
 
 ## Install
@@ -32,6 +33,12 @@ The installer uses `%LOCALAPPDATA%\Programs\Candle Tray` for the current user
 and creates a Start Menu shortcut. For the portable version, extract the ZIP
 and run `candle-tray.exe`; no separate asset folder is required.
 Uninstalling preserves your settings silently.
+
+Candle Tray checks for a new release at startup and once a day (Settings >
+About can turn this off). An update is only installed when you choose
+**Update** in the flyout or on the About page: the app downloads the portable
+ZIP for its architecture, verifies its SHA-256 and restarts into the new
+version. Both the installed and the portable version update this way.
 
 ## Command line
 
