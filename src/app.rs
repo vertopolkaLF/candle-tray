@@ -8,9 +8,12 @@ use std::time::{Duration, Instant};
 
 use gpui::Context;
 
+use crate::hotkey::{Action, Hotkey};
 use crate::levels;
 use crate::monitors::{Command, Event, LevelTarget, Monitor, MonitorService, SnapshotReason};
-use crate::settings::{MonitorSettings, Profile, ProfileIcon, ProfileLevels, Settings};
+use crate::settings::{
+    MonitorSettings, Profile, ProfileIcon, ProfileLevels, ScheduleTarget, Settings,
+};
 use crate::twinkle_import::PendingImport;
 
 /// Persists a settings snapshot off the UI thread (the serial settings
@@ -31,9 +34,36 @@ pub struct AppModel {
     /// When the user last set each display, so hardware echoes of earlier
     /// throttled writes cannot drag the slider back mid-drag.
     local_edits: HashMap<String, Instant>,
+    /// Set while the displays are dimmed for inactivity: the displays that
+    /// were dimmed. Their remembered levels come back on the next input.
+    idle_dimmed: Option<Vec<String>>,
+    /// The schedule entry applied last and when it fired (Unix seconds).
+    schedule_applied: Option<(usize, i64)>,
+    /// A schedule change fading in.
+    fade: Option<Fade>,
     service: Arc<MonitorService>,
     persist: PersistFn,
 }
+
+/// Brightness moving from one level to another over time.
+struct Fade {
+    started: Instant,
+    duration: Duration,
+    steps: Vec<FadeStep>,
+}
+
+struct FadeStep {
+    id: String,
+    from: u8,
+    to: u8,
+    /// Level written last.
+    current: u8,
+}
+
+/// Percent per wheel notch over the tray icon, as over a popup slider.
+const TRAY_SCROLL_STEP: i32 = 2;
+/// Pause before turning displays off from a shortcut or the tray menu.
+const TURN_OFF_DELAY: Duration = Duration::from_millis(500);
 
 /// One row the popup shows.
 #[derive(Clone, Debug)]
@@ -60,6 +90,7 @@ impl AppModel {
     pub fn new(settings: Settings, service: Arc<MonitorService>, persist: PersistFn) -> Self {
         service.send(Command::SetThrottle(throttle(&settings)));
         publish_hotkeys(&settings);
+        crate::tray::set_scroll_enabled(settings.tray_scroll);
         Self {
             monitors: Vec::new(),
             settings,
@@ -67,6 +98,9 @@ impl AppModel {
             import_offer: None,
             import_pending: None,
             local_edits: HashMap::new(),
+            idle_dimmed: None,
+            schedule_applied: None,
+            fade: None,
             service,
             persist,
         }
@@ -94,6 +128,15 @@ impl AppModel {
                     if !targets.is_empty() {
                         self.service.send(Command::Apply(targets));
                     }
+                }
+                // Restoring brightened dimmed displays; dim them again on the
+                // next tick if the user is still away.
+                if self.idle_dimmed.is_some() && reason != SnapshotReason::Requested {
+                    self.idle_dimmed = None;
+                }
+                // The schedule applies at startup and catches up after sleep.
+                if self.run_schedule(false) {
+                    self.save();
                 }
                 // Remember levels of displays seen for the first time, so
                 // the next resume restores what the user saw.
@@ -236,17 +279,36 @@ impl AppModel {
 
     /// Set one display from its slider value (0..=100, normalized).
     pub fn set_brightness(&mut self, id: &str, slider: u8, cx: &mut Context<Self>) {
+        self.interrupt_automation();
         self.apply_level(id, slider);
         self.save();
         cx.notify();
     }
 
-    /// Write a slider value to the level it drives: the SDR white level
-    /// while HDR is on, the hardware brightness otherwise.
+    /// Remember a slider value and write it, unless the display is dimmed
+    /// for inactivity: then it lands when the user comes back.
     fn apply_level(&mut self, id: &str, slider: u8) {
         let slider = slider.min(100);
-        let entry = self.settings.monitors.entry(id.to_owned()).or_default();
-        entry.last_brightness = Some(slider);
+        self.settings
+            .monitors
+            .entry(id.to_owned())
+            .or_default()
+            .last_brightness = Some(slider);
+        if !self
+            .idle_dimmed
+            .as_ref()
+            .is_some_and(|dimmed| dimmed.iter().any(|d| d == id))
+        {
+            self.write_level(id, slider);
+        }
+    }
+
+    /// Write a slider value to the level it drives: the SDR white level
+    /// while HDR is on, the hardware brightness otherwise. Nothing is
+    /// remembered.
+    fn write_level(&mut self, id: &str, slider: u8) {
+        let slider = slider.min(100);
+        let entry = self.settings.monitor(id);
         let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) else {
             return;
         };
@@ -269,20 +331,91 @@ impl AppModel {
 
     /// The "All displays" slider: every visible controllable display.
     pub fn set_all(&mut self, slider: u8, cx: &mut Context<Self>) {
-        let ids: Vec<String> = self
-            .rows()
-            .into_iter()
-            .filter(|row| row.slider.is_some() && !row.monitor.unresponsive)
-            .map(|row| row.monitor.id)
-            .collect();
-        for id in ids {
+        self.interrupt_automation();
+        for id in self.controllable_ids() {
             self.apply_level(&id, slider);
         }
         self.save();
         cx.notify();
     }
 
+    /// Visible displays whose level can be set right now.
+    fn controllable_ids(&self) -> Vec<String> {
+        self.rows()
+            .into_iter()
+            .filter(|row| {
+                row.slider.is_some() && !row.monitor.unresponsive && !row.monitor.powered_off
+            })
+            .map(|row| row.monitor.id)
+            .collect()
+    }
+
+    /// Current slider value of a connected display.
+    fn slider_of(&self, id: &str) -> Option<u8> {
+        let monitor = self.monitors.iter().find(|m| m.id == id)?;
+        slider_level(monitor, &self.settings.monitor(id))
+    }
+
+    /// Move every visible display by `delta` percent (shortcuts, tray wheel).
+    pub fn step_all(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.interrupt_automation();
+        for id in self.controllable_ids() {
+            if let Some(current) = self.slider_of(&id) {
+                let next = (i32::from(current) + delta).clamp(0, 100) as u8;
+                if next != current {
+                    self.apply_level(&id, next);
+                }
+            }
+        }
+        self.save();
+        cx.notify();
+    }
+
+    /// The wheel turned over the tray icon.
+    pub fn scroll_all(&mut self, notches: i32, cx: &mut Context<Self>) {
+        if self.settings.tray_scroll {
+            self.step_all(notches * TRAY_SCROLL_STEP, cx);
+        }
+    }
+
+    /// A global shortcut was pressed.
+    pub fn run_shortcut(&mut self, action: Action, cx: &mut Context<Self>) {
+        let step = i32::from(self.settings.shortcut_step.clamp(1, 100));
+        match action {
+            Action::Profile(index) => self.apply_profile(index, cx),
+            Action::BrightnessUp => self.step_all(step, cx),
+            Action::BrightnessDown => self.step_all(-step, cx),
+            Action::TurnOff => self.turn_off(cx),
+        }
+    }
+
+    /// Turn the displays off the way the settings say. Waits a moment
+    /// first, as legacy did: releasing the shortcut's keys would otherwise
+    /// count as input and wake the displays at once.
+    pub fn turn_off(&mut self, cx: &mut Context<Self>) {
+        let mode = self.settings.turn_off.into();
+        let service = Arc::clone(&self.service);
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(TURN_OFF_DELAY).await;
+            service.send(Command::TurnOff(mode));
+        })
+        .detach();
+    }
+
+    /// Switch a display to another input (DDC/CI VCP 0x60).
+    pub fn set_input(&mut self, id: &str, value: u8, cx: &mut Context<Self>) {
+        if let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) {
+            monitor.input = Some(value);
+        }
+        self.service.send(Command::SetInput {
+            id: id.to_owned(),
+            value,
+        });
+        cx.notify();
+    }
+
     pub fn set_contrast(&mut self, id: &str, percent: u8, cx: &mut Context<Self>) {
+        self.interrupt_automation();
         self.apply_contrast(id, percent);
         self.save();
         cx.notify();
@@ -290,6 +423,7 @@ impl AppModel {
 
     /// The linked contrast slider: every visible display showing contrast.
     pub fn set_contrast_all(&mut self, percent: u8, cx: &mut Context<Self>) {
+        self.interrupt_automation();
         let ids: Vec<String> = self
             .rows()
             .into_iter()
@@ -451,6 +585,7 @@ impl AppModel {
 
     /// Apply a profile to the connected displays it knows.
     pub fn apply_profile(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.interrupt_automation();
         let Some(profile) = self.settings.profiles.get(index).cloned() else {
             return;
         };
@@ -566,19 +701,14 @@ impl AppModel {
         });
     }
 
-    /// Give a profile a shortcut, taking it away from any other profile.
-    pub fn set_profile_hotkey(
-        &mut self,
-        index: usize,
-        hotkey: Option<crate::hotkey::Hotkey>,
-        cx: &mut Context<Self>,
-    ) {
+    /// Give an action a shortcut, taking it away from any other action.
+    pub fn set_hotkey(&mut self, action: Action, hotkey: Option<Hotkey>, cx: &mut Context<Self>) {
         self.edit(cx, |settings| {
-            for (other, profile) in settings.profiles.iter_mut().enumerate() {
-                if other == index {
-                    profile.hotkey = hotkey;
-                } else if hotkey.is_some() && profile.hotkey == hotkey {
-                    profile.hotkey = None;
+            for (known, slot) in settings.hotkeys_mut() {
+                if known == action {
+                    *slot = hotkey;
+                } else if hotkey.is_some() && *slot == hotkey {
+                    *slot = None;
                 }
             }
         });
@@ -619,21 +749,11 @@ impl AppModel {
 
     /// Move a profile to another place in the bottom bar.
     pub fn move_profile(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
-        self.edit(cx, |settings| {
-            let profiles = &mut settings.profiles;
-            if from < profiles.len() && to < profiles.len() && from != to {
-                let moved = profiles.remove(from);
-                profiles.insert(to, moved);
-            }
-        });
+        self.edit(cx, |settings| settings.move_profile(from, to));
     }
 
     pub fn delete_profile(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.edit(cx, |settings| {
-            if index < settings.profiles.len() {
-                settings.profiles.remove(index);
-            }
-        });
+        self.edit(cx, |settings| settings.delete_profile(index));
     }
 
     pub fn refresh(&self) {
@@ -650,6 +770,7 @@ impl AppModel {
         let before = self.settings.clone();
         change(&mut self.settings);
         self.apply_runtime_effects(&before);
+        self.automation_changed(&before);
         self.save();
         cx.notify();
     }
@@ -658,8 +779,226 @@ impl AppModel {
     pub fn replace_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
         let before = std::mem::replace(&mut self.settings, settings);
         self.apply_runtime_effects(&before);
+        self.automation_changed(&before);
         self.save();
         cx.notify();
+    }
+
+    // ----- automation --------------------------------------------------------
+
+    /// One pass of idle dimming, the schedule and its fade. Returns how
+    /// soon to run again: often while dimmed (to brighten the moment the
+    /// user is back) or fading, rarely otherwise.
+    pub fn automation_tick(&mut self, cx: &mut Context<Self>) -> Duration {
+        if !self.loaded {
+            return Duration::from_secs(1);
+        }
+        let mut changed = self.check_idle();
+        changed |= self.run_schedule(true);
+        changed |= self.step_fade();
+        if changed {
+            self.save();
+            cx.notify();
+        }
+        if self.idle_dimmed.is_some() {
+            Duration::from_millis(250)
+        } else if self.fade.is_some() {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(5)
+        }
+    }
+
+    /// Dim after the configured time without input; brighten on input.
+    fn check_idle(&mut self) -> bool {
+        let config = self.settings.idle_dim;
+        let idle = crate::automation::idle_time();
+        let threshold = Duration::from_secs(u64::from(config.minutes.max(1)) * 60);
+        if self.idle_dimmed.is_some() {
+            if !config.enabled || idle < threshold {
+                self.wake_displays();
+                return true;
+            }
+            return false;
+        }
+        if !config.enabled
+            || idle < threshold
+            || (config.respect_busy && crate::automation::screen_kept_on())
+        {
+            return false;
+        }
+        // Whatever was fading stays where it got to.
+        self.freeze_fade();
+        let level = config.level.min(100);
+        let mut dimmed = Vec::new();
+        for id in self.controllable_ids() {
+            if self.slider_of(&id).is_some_and(|current| current > level) {
+                self.write_level(&id, level);
+                dimmed.push(id);
+            }
+        }
+        crate::logger::info(format!("Idle: dimmed {} displays", dimmed.len()));
+        self.idle_dimmed = Some(dimmed);
+        true
+    }
+
+    /// Bring dimmed displays back to their remembered levels.
+    fn wake_displays(&mut self) {
+        for id in self.idle_dimmed.take().unwrap_or_default() {
+            if let Some(slider) = self.settings.monitor(&id).last_brightness {
+                self.write_level(&id, slider);
+            }
+        }
+    }
+
+    /// The user took over: stop fading and leave idle dimming.
+    fn interrupt_automation(&mut self) {
+        self.freeze_fade();
+        self.wake_displays();
+    }
+
+    /// Stop a fade, remembering the levels it reached.
+    fn freeze_fade(&mut self) {
+        for step in self.fade.take().map(|fade| fade.steps).unwrap_or_default() {
+            self.settings
+                .monitors
+                .entry(step.id)
+                .or_default()
+                .last_brightness = Some(step.current);
+        }
+    }
+
+    /// Apply the schedule entry in effect if it is not applied yet. `live`
+    /// fades the change in; startup and catching up after sleep apply at
+    /// once.
+    fn run_schedule(&mut self, live: bool) -> bool {
+        let schedule = &self.settings.schedule;
+        if !schedule.enabled || !self.loaded {
+            self.schedule_applied = None;
+            return false;
+        }
+        let Some((index, at)) = crate::schedule::active(
+            &schedule.entries,
+            &chrono::Local::now(),
+            schedule.location(),
+        ) else {
+            return false;
+        };
+        let key = (index, at.timestamp());
+        // While dimmed for inactivity the entry waits for the user.
+        if self.schedule_applied == Some(key) || self.idle_dimmed.is_some() {
+            return false;
+        }
+        let fade = if live && self.schedule_applied.is_some() {
+            Duration::from_secs(u64::from(schedule.fade_seconds))
+        } else {
+            Duration::ZERO
+        };
+        let target = schedule.entries[index].target;
+        crate::logger::info(format!("Schedule: applying entry {index} ({target:?})"));
+        self.schedule_applied = Some(key);
+        self.apply_schedule_target(target, fade);
+        true
+    }
+
+    fn apply_schedule_target(&mut self, target: ScheduleTarget, fade: Duration) {
+        self.freeze_fade();
+        let mut levels: Vec<(String, u8)> = Vec::new();
+        match target {
+            ScheduleTarget::Level { level } => {
+                for id in self.controllable_ids() {
+                    levels.push((id, level.min(100)));
+                }
+            }
+            ScheduleTarget::Profile { index } => {
+                let Some(profile) = self.settings.profiles.get(index).cloned() else {
+                    return;
+                };
+                let connected = self.controllable_ids();
+                for (id, saved) in &profile.levels {
+                    if let Some(slider) = saved.brightness.or(saved.sdr)
+                        && connected.contains(id)
+                    {
+                        levels.push((id.clone(), slider.min(100)));
+                    }
+                    let has_contrast = self
+                        .monitors
+                        .iter()
+                        .any(|m| m.id == *id && m.contrast.is_some() && !m.unresponsive);
+                    if let Some(contrast) = saved.contrast.filter(|_| has_contrast) {
+                        self.apply_contrast(id, contrast);
+                    }
+                }
+            }
+        }
+        let mut steps = Vec::new();
+        for (id, to) in levels {
+            let from = match self.slider_of(&id) {
+                Some(from) if !fade.is_zero() => from,
+                _ => {
+                    self.apply_level(&id, to);
+                    continue;
+                }
+            };
+            // Remember the destination: a restart mid-fade restores it.
+            self.settings
+                .monitors
+                .entry(id.clone())
+                .or_default()
+                .last_brightness = Some(to);
+            if from != to {
+                steps.push(FadeStep {
+                    id,
+                    from,
+                    to,
+                    current: from,
+                });
+            }
+        }
+        if !steps.is_empty() {
+            self.fade = Some(Fade {
+                started: Instant::now(),
+                duration: fade,
+                steps,
+            });
+            self.step_fade();
+        }
+    }
+
+    fn step_fade(&mut self) -> bool {
+        let Some(fade) = &mut self.fade else {
+            return false;
+        };
+        let progress = fade.started.elapsed().as_secs_f32() / fade.duration.as_secs_f32();
+        let mut writes = Vec::new();
+        for step in &mut fade.steps {
+            let level = crate::schedule::blend(step.from, step.to, progress);
+            if level != step.current {
+                step.current = level;
+                writes.push((step.id.clone(), level));
+            }
+        }
+        if progress >= 1.0 {
+            self.fade = None;
+        }
+        for (id, level) in &writes {
+            self.write_level(id, *level);
+        }
+        !writes.is_empty()
+    }
+
+    /// Settings edits that start or stop automation take effect now.
+    fn automation_changed(&mut self, before: &Settings) {
+        let (now, then) = (&self.settings.schedule, &before.schedule);
+        if now != then {
+            if !now.enabled {
+                self.freeze_fade();
+            }
+            self.run_schedule(true);
+        }
+        if before.idle_dim.enabled && !self.settings.idle_dim.enabled {
+            self.wake_displays();
+        }
     }
 
     /// Another thread changed the stored settings; nothing is persisted here.
@@ -670,6 +1009,7 @@ impl AppModel {
     fn apply_runtime_effects(&self, before: &Settings) {
         let now = &self.settings;
         publish_hotkeys(now);
+        crate::tray::set_scroll_enabled(now.tray_scroll);
         if now.update_interval_ms != before.update_interval_ms {
             self.service.send(Command::SetThrottle(throttle(now)));
         }
@@ -743,15 +1083,9 @@ fn slider_level(monitor: &Monitor, settings: &MonitorSettings) -> Option<u8> {
 /// How long a local edit outranks hardware reports for the same display.
 const LOCAL_EDIT_HOLD: Duration = Duration::from_millis(1500);
 
-/// Hand the profile shortcuts to the tray thread, which registers them.
+/// Hand every shortcut to the tray thread, which registers them.
 fn publish_hotkeys(settings: &Settings) {
-    crate::hotkey::set_desired(
-        settings
-            .profiles
-            .iter()
-            .map(|profile| profile.hotkey)
-            .collect(),
-    );
+    crate::hotkey::set_desired(settings.hotkeys());
 }
 
 fn throttle(settings: &Settings) -> std::time::Duration {
@@ -823,6 +1157,8 @@ mod tests {
             contrast: None,
             hdr_supported: false,
             supports_ddc_power: false,
+            inputs: Vec::new(),
+            input: None,
             powered_off: false,
             unresponsive: false,
         }

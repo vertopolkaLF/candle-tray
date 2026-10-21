@@ -1,13 +1,12 @@
 //! The Profiles page: name, icon, shortcut and stored levels of each profile.
 
 use gpui::{
-    AnyElement, Context, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window,
-    div, px,
+    AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px,
 };
 
 use super::kit::{self, Button, Kit, Row, SliderRange};
 use super::window::SettingsWindow;
-use crate::hotkey::{Hotkey, Status};
+use crate::hotkey::Action;
 use crate::popup::ui::assets::profile_glyph;
 use crate::settings::{ProfileIcon, ProfileLevels};
 
@@ -118,7 +117,14 @@ impl SettingsWindow {
                 }),
             );
 
-            let shortcut = self.hotkey_row(k, index, profile.hotkey, cx);
+            let shortcut = self.hotkey_row(
+                k,
+                Action::Profile(index),
+                profile.hotkey,
+                tr("profiles-shortcut"),
+                Some(tr("profiles-shortcut-description")),
+                cx,
+            );
 
             let mut level_rows = Vec::new();
             for (id, display, connected, levels) in entries {
@@ -264,112 +270,5 @@ impl SettingsWindow {
             ]
         }));
         page
-    }
-
-    /// Records a profile shortcut: the button waits for the next
-    /// combination, Esc cancels and Backspace or Delete clears it.
-    fn hotkey_row(
-        &self,
-        k: &mut Kit,
-        index: usize,
-        current: Option<Hotkey>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let recording = self.hotkey_recording == Some(index);
-        let label: SharedString = if recording {
-            tr("profiles-shortcut-press")
-        } else if let Some(hotkey) = current {
-            hotkey.label().into()
-        } else {
-            tr("profiles-shortcut-not-set")
-        };
-        let mut button = Button::new(format!("profile-hotkey-{index}"), label).on_click(Self::h(
-            cx,
-            move |this, (), window, cx| {
-                if this.hotkey_recording == Some(index) {
-                    this.stop_hotkey_recording();
-                } else {
-                    this.hotkey_recording = Some(index);
-                    this.hotkey_rejected = false;
-                    crate::hotkey::set_suspended(true);
-                    // Text fields would otherwise consume the keystrokes.
-                    this.focus_page(window);
-                }
-                cx.notify();
-            },
-        ));
-        if recording {
-            button = button.accent();
-        }
-        let mut row = Row::new(
-            format!("profile-hotkey-row-{index}"),
-            tr("profiles-shortcut"),
-        )
-        .description(k, tr("profiles-shortcut-description"));
-        let detail = if recording && self.hotkey_rejected {
-            Some((
-                crate::i18n::tr("profiles-shortcut-needs-modifier"),
-                k.theme.caution,
-            ))
-        } else if recording {
-            Some((
-                crate::i18n::tr("profiles-shortcut-hint"),
-                k.theme.text_secondary,
-            ))
-        } else if current.is_some() && crate::hotkey::status(index) == Status::Unavailable {
-            Some((crate::i18n::tr("profiles-shortcut-in-use"), k.theme.caution))
-        } else {
-            None
-        };
-        if let Some((text, color)) = detail {
-            row = row.detail(kit::text(text, 12.0, color).into_any_element());
-        }
-        if current.is_some() && !recording {
-            row = row.trailing(
-                Button::icon_only(format!("profile-hotkey-clear-{index}"), "x-circle-fill")
-                    .ghost()
-                    .tooltip(tr("profiles-shortcut-clear"))
-                    .on_click(Self::h(cx, move |this, (), _, cx| {
-                        this.model
-                            .update(cx, |model, cx| model.set_profile_hotkey(index, None, cx));
-                    }))
-                    .render(k),
-            );
-        }
-        row.trailing(button.render(k)).render(k)
-    }
-
-    pub(super) fn stop_hotkey_recording(&mut self) {
-        self.hotkey_recording = None;
-        self.hotkey_rejected = false;
-        crate::hotkey::set_suspended(false);
-    }
-
-    /// Consumes a key press while a shortcut button is recording.
-    pub(super) fn record_hotkey(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
-        let Some(index) = self.hotkey_recording else {
-            return false;
-        };
-        let modifiers = &event.keystroke.modifiers;
-        let bare = !(modifiers.control || modifiers.alt || modifiers.shift || modifiers.platform);
-        match event.keystroke.key.as_str() {
-            "escape" if bare => self.stop_hotkey_recording(),
-            "backspace" | "delete" if bare => {
-                self.stop_hotkey_recording();
-                self.model
-                    .update(cx, |model, cx| model.set_profile_hotkey(index, None, cx));
-            }
-            _ => match crate::hotkey::pressed_now().filter(Hotkey::is_valid) {
-                Some(hotkey) => {
-                    self.stop_hotkey_recording();
-                    self.model.update(cx, |model, cx| {
-                        model.set_profile_hotkey(index, Some(hotkey), cx)
-                    });
-                }
-                None => self.hotkey_rejected = true,
-            },
-        }
-        cx.notify();
-        true
     }
 }

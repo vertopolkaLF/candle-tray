@@ -122,7 +122,8 @@ impl Ddc {
     pub fn set(&self, code: u8, value: u32) -> bool {
         self.retry(|| unsafe { SetVCPFeature(self.0, code, value) })
     }
-    pub fn power_supported(&self) -> bool {
+    /// The MCCS capabilities string, e.g. `(prot(monitor)...vcp(10 12 60(0F 11))...)`.
+    pub fn capabilities(&self) -> Option<String> {
         let mut len = 0;
         // Some monitors fail this request even without a transient transport
         // error. Legacy deliberately retries the length query three times.
@@ -133,10 +134,10 @@ impl Ddc {
             unsafe { GetCapabilitiesStringLength(self.0, &mut len) != 0 }
         });
         if !found || len == 0 || len > 1024 * 1024 {
-            return false;
+            return None;
         }
         let mut buffer = vec![0; len as usize];
         self.retry(|| unsafe { CapabilitiesRequestAndCapabilitiesReply(self.0, &mut buffer) })
-            && rules::has_power(&String::from_utf8_lossy(&buffer))
+            .then(|| String::from_utf8_lossy(&buffer).into_owned())
     }
 }

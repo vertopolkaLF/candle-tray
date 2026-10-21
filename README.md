@@ -9,6 +9,11 @@ by Xander Frangos. Candle Tray is licensed under the MIT license.
 - Monitor brightness through DDC/CI and WMI.
 - SDR white level for HDR displays.
 - Linked brightness levels, display power-off, and level restoration.
+- Level profiles, and global shortcuts for profiles, brightness steps and
+  turning displays off. Scrolling over the tray icon changes brightness.
+- A time-of-day schedule (clock times, sunrise and sunset) with smooth
+  transitions, and dimming after a period without input.
+- Input source switching for DDC/CI displays (VCP 0x60).
 - General and per-monitor settings that apply live.
 - Twinkle Tray settings import.
 - English and Russian interfaces.

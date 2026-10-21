@@ -292,8 +292,11 @@ fn handle_command(
             let model = model.clone();
             let _ = cx.update(|cx| crate::settings_window::open(model, cx));
         }
-        PopupCommand::ApplyProfile(index) => {
-            let _ = model.update(cx, |model, cx| model.apply_profile(index, cx));
+        PopupCommand::Shortcut(action) => {
+            let _ = model.update(cx, |model, cx| model.run_shortcut(action, cx));
+        }
+        PopupCommand::TrayScroll(notches) => {
+            let _ = model.update(cx, |model, cx| model.scroll_all(notches, cx));
         }
         PopupCommand::Run(job) => {
             let _ = cx.update(|cx| job(cx));

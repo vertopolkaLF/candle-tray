@@ -99,11 +99,43 @@ pub struct Monitor {
     pub contrast: Option<u8>,
     /// The display reported VCP 0xD6 (power mode) in its capabilities.
     pub supports_ddc_power: bool,
+    /// Input sources listed for VCP 0x60 in the display's capabilities.
+    pub inputs: Vec<u8>,
+    /// Current input source, `None` when unknown.
+    pub input: Option<u8>,
     /// Switched off through DDC/CI (VCP 0xD6) by this app.
     pub powered_off: bool,
     /// True while the monitor's worker is stuck or timed out; the UI dims
     /// the row and ignores input until the next successful refresh.
     pub unresponsive: bool,
+}
+
+/// Name of a VCP 0x60 input source value (MCCS), such as "HDMI 1".
+pub fn input_label(value: u8) -> String {
+    let name = match value {
+        0x01 => "VGA 1",
+        0x02 => "VGA 2",
+        0x03 => "DVI 1",
+        0x04 => "DVI 2",
+        0x05 => "Composite 1",
+        0x06 => "Composite 2",
+        0x07 => "S-Video 1",
+        0x08 => "S-Video 2",
+        0x09 => "Tuner 1",
+        0x0a => "Tuner 2",
+        0x0b => "Tuner 3",
+        0x0c => "Component 1",
+        0x0d => "Component 2",
+        0x0e => "Component 3",
+        0x0f => "DisplayPort 1",
+        0x10 => "DisplayPort 2",
+        0x11 => "HDMI 1",
+        0x12 => "HDMI 2",
+        // Not in MCCS, but what most USB-C displays report.
+        0x1b => "USB-C",
+        _ => return format!("0x{value:02X}"),
+    };
+    name.to_owned()
 }
 
 /// SDR content brightness on an HDR display.
@@ -148,6 +180,11 @@ pub enum Command {
     SetHdr {
         id: MonitorId,
         on: bool,
+    },
+    /// Switch the display to another input source (VCP 0x60).
+    SetInput {
+        id: MonitorId,
+        value: u8,
     },
     /// Write several levels at once (restore after startup/resume/display
     /// change). Same coalescing as the single setters.

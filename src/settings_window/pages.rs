@@ -357,6 +357,40 @@ impl SettingsWindow {
                     )
                 });
 
+            // Only displays that list input sources (VCP 0x60) get the option.
+            let inputs = (row.monitor.inputs.len() > 1 || row.settings.show_inputs).then(|| {
+                let inputs_id = id.clone();
+                let available = row
+                    .monitor
+                    .inputs
+                    .iter()
+                    .map(|value| crate::monitors::input_label(*value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let description = if available.is_empty() {
+                    crate::i18n::tr("monitors-inputs-description")
+                } else {
+                    format!(
+                        "{} {}",
+                        crate::i18n::tr("monitors-inputs-description"),
+                        crate::i18n::format("monitors-inputs-available", &[("inputs", available)])
+                    )
+                };
+                kit::toggle_row(
+                    k,
+                    format!("inputs-{id}"),
+                    tr("monitors-inputs"),
+                    Some(description.into()),
+                    row.settings.show_inputs,
+                    Self::h(cx, move |this, value: bool, _, cx| {
+                        let id = inputs_id.clone();
+                        this.edit(cx, move |settings| {
+                            settings.monitors.entry(id).or_default().show_inputs = value;
+                        });
+                    }),
+                )
+            });
+
             let min_id = id.clone();
             let min = row.settings.min;
             let max = row.settings.max;
@@ -475,6 +509,7 @@ impl SettingsWindow {
                     max_row,
                 ];
                 rows.extend(contrast);
+                rows.extend(inputs);
                 rows.push(
                     Row::new(format!("order-row-{id}"), tr("monitors-order"))
                         .trailing(order)

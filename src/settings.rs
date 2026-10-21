@@ -15,6 +15,7 @@ use std::{
     thread,
 };
 
+use crate::hotkey::{Action, Hotkey};
 use crate::monitors::{MonitorId, TurnOffMode};
 
 pub const CURRENT_VERSION: u32 = 1;
@@ -141,6 +142,117 @@ pub struct Profile {
     pub levels: BTreeMap<MonitorId, ProfileLevels>,
 }
 
+/// System-wide shortcuts that are not tied to a profile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Shortcuts {
+    /// Raise every visible display by [`Settings::shortcut_step`].
+    pub brightness_up: Option<crate::hotkey::Hotkey>,
+    /// Lower every visible display by [`Settings::shortcut_step`].
+    pub brightness_down: Option<crate::hotkey::Hotkey>,
+    /// Turn the displays off the way [`Settings::turn_off`] says.
+    pub turn_off: Option<crate::hotkey::Hotkey>,
+}
+
+/// Dim the displays after a while without keyboard or mouse input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IdleDim {
+    pub enabled: bool,
+    /// Minutes without input before dimming.
+    pub minutes: u16,
+    /// Slider level the displays dim to; darker displays stay as they are.
+    pub level: u8,
+    /// Stay bright while an app keeps the screen on (video, presentations)
+    /// or runs full screen.
+    pub respect_busy: bool,
+}
+
+impl Default for IdleDim {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            minutes: 5,
+            level: 10,
+            respect_busy: true,
+        }
+    }
+}
+
+/// When a schedule entry fires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "at", rename_all = "snake_case")]
+pub enum ScheduleTime {
+    /// Minutes after local midnight.
+    Clock { minutes: u16 },
+    /// Minutes after (or before, when negative) local sunrise.
+    Sunrise { offset: i16 },
+    /// Minutes after (or before, when negative) local sunset.
+    Sunset { offset: i16 },
+}
+
+impl Default for ScheduleTime {
+    fn default() -> Self {
+        Self::Clock { minutes: 8 * 60 }
+    }
+}
+
+/// What a schedule entry applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScheduleTarget {
+    /// One slider level for every visible display.
+    Level { level: u8 },
+    /// A profile, by its index in [`Settings::profiles`].
+    Profile { index: usize },
+}
+
+impl Default for ScheduleTarget {
+    fn default() -> Self {
+        Self::Level { level: 80 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScheduleEntry {
+    pub time: ScheduleTime,
+    pub target: ScheduleTarget,
+}
+
+/// Levels that change by time of day.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Schedule {
+    pub enabled: bool,
+    pub entries: Vec<ScheduleEntry>,
+    /// Needed for sunrise and sunset entries.
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    /// How long a change that fires while the app runs takes to fade in.
+    pub fade_seconds: u32,
+}
+
+impl Default for Schedule {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            entries: Vec::new(),
+            latitude: None,
+            longitude: None,
+            fade_seconds: 60,
+        }
+    }
+}
+
+impl Schedule {
+    pub fn location(&self) -> Option<(f64, f64)> {
+        let (latitude, longitude) = (self.latitude?, self.longitude?);
+        ((-90.0..=90.0).contains(&latitude) && (-180.0..=180.0).contains(&longitude))
+            .then_some((latitude, longitude))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOffSetting {
@@ -178,6 +290,8 @@ pub struct MonitorSettings {
     pub show_contrast: bool,
     /// Last contrast percent, restored the same way.
     pub last_contrast: Option<u8>,
+    /// Show input source buttons in the flyout (DDC/CI VCP 0x60).
+    pub show_inputs: bool,
 }
 
 impl Default for MonitorSettings {
@@ -190,6 +304,7 @@ impl Default for MonitorSettings {
             last_brightness: None,
             show_contrast: false,
             last_contrast: None,
+            show_inputs: false,
         }
     }
 }
@@ -221,6 +336,13 @@ pub struct Settings {
     /// Level profiles in bottom-bar order.
     #[serde(alias = "templates")]
     pub profiles: Vec<Profile>,
+    pub shortcuts: Shortcuts,
+    /// Percent the brightness shortcuts move every display by.
+    pub shortcut_step: u8,
+    /// Scrolling over the tray icon changes every visible display.
+    pub tray_scroll: bool,
+    pub idle_dim: IdleDim,
+    pub schedule: Schedule,
 }
 
 impl Default for Settings {
@@ -242,6 +364,11 @@ impl Default for Settings {
             monitors: BTreeMap::new(),
             twinkle_import_done: false,
             profiles: Vec::new(),
+            shortcuts: Shortcuts::default(),
+            shortcut_step: 10,
+            tray_scroll: true,
+            idle_dim: IdleDim::default(),
+            schedule: Schedule::default(),
         }
     }
 }
@@ -332,6 +459,76 @@ impl Settings {
 
     pub fn monitor(&self, id: &str) -> MonitorSettings {
         self.monitors.get(id).cloned().unwrap_or_default()
+    }
+
+    /// Every shortcut slot: one per profile, then the fixed actions.
+    pub fn hotkeys(&self) -> Vec<(Action, Option<Hotkey>)> {
+        let mut hotkeys: Vec<_> = self
+            .profiles
+            .iter()
+            .enumerate()
+            .map(|(index, profile)| (Action::Profile(index), profile.hotkey))
+            .collect();
+        hotkeys.extend([
+            (Action::BrightnessUp, self.shortcuts.brightness_up),
+            (Action::BrightnessDown, self.shortcuts.brightness_down),
+            (Action::TurnOff, self.shortcuts.turn_off),
+        ]);
+        hotkeys
+    }
+
+    pub fn hotkeys_mut(&mut self) -> Vec<(Action, &mut Option<Hotkey>)> {
+        let mut hotkeys: Vec<_> = self
+            .profiles
+            .iter_mut()
+            .enumerate()
+            .map(|(index, profile)| (Action::Profile(index), &mut profile.hotkey))
+            .collect();
+        hotkeys.extend([
+            (Action::BrightnessUp, &mut self.shortcuts.brightness_up),
+            (Action::BrightnessDown, &mut self.shortcuts.brightness_down),
+            (Action::TurnOff, &mut self.shortcuts.turn_off),
+        ]);
+        hotkeys
+    }
+
+    /// Move a profile; schedule entries follow it to its new place.
+    pub fn move_profile(&mut self, from: usize, to: usize) {
+        let count = self.profiles.len();
+        if from >= count || to >= count || from == to {
+            return;
+        }
+        let moved = self.profiles.remove(from);
+        self.profiles.insert(to, moved);
+        // `order[new] = old`.
+        let mut order: Vec<usize> = (0..count).collect();
+        let old = order.remove(from);
+        order.insert(to, old);
+        for entry in &mut self.schedule.entries {
+            if let ScheduleTarget::Profile { index } = &mut entry.target
+                && let Some(new) = order.iter().position(|old| old == index)
+            {
+                *index = new;
+            }
+        }
+    }
+
+    /// Delete a profile and the schedule entries that apply it.
+    pub fn delete_profile(&mut self, index: usize) {
+        if index >= self.profiles.len() {
+            return;
+        }
+        self.profiles.remove(index);
+        self.schedule
+            .entries
+            .retain(|entry| entry.target != ScheduleTarget::Profile { index });
+        for entry in &mut self.schedule.entries {
+            if let ScheduleTarget::Profile { index: other } = &mut entry.target
+                && *other > index
+            {
+                *other -= 1;
+            }
+        }
     }
 }
 
@@ -503,6 +700,9 @@ mod tests {
         assert_eq!(settings.slider_step(), 1);
         assert_eq!(settings.monitors["a"].max, 100);
         assert!(settings.restore_levels);
+        assert!(settings.tray_scroll);
+        assert_eq!(settings.shortcut_step, 10);
+        assert!(!settings.idle_dim.enabled && !settings.schedule.enabled);
     }
     #[test]
     fn slider_steps_round_trip_and_invalid_values_fall_back() {
@@ -546,6 +746,65 @@ mod tests {
         });
         let raw = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&raw).unwrap(), settings);
+    }
+    #[test]
+    fn automation_settings_round_trip() {
+        let mut settings = Settings::default();
+        settings.schedule.enabled = true;
+        settings.schedule.latitude = Some(55.75);
+        settings.schedule.longitude = Some(37.62);
+        settings.schedule.entries = vec![
+            ScheduleEntry {
+                time: ScheduleTime::Clock { minutes: 7 * 60 },
+                target: ScheduleTarget::Level { level: 70 },
+            },
+            ScheduleEntry {
+                time: ScheduleTime::Sunset { offset: -30 },
+                target: ScheduleTarget::Profile { index: 1 },
+            },
+        ];
+        settings.shortcuts.turn_off = Some(crate::hotkey::Hotkey {
+            ctrl: true,
+            alt: false,
+            shift: true,
+            win: false,
+            key: 0x4F,
+        });
+        settings.idle_dim.enabled = true;
+        settings
+            .monitors
+            .insert("a".into(), MonitorSettings::default());
+        settings.monitors.get_mut("a").unwrap().show_inputs = true;
+        let raw = toml::to_string_pretty(&settings).unwrap();
+        assert_eq!(toml::from_str::<Settings>(&raw).unwrap(), settings);
+        assert_eq!(settings.schedule.location(), Some((55.75, 37.62)));
+    }
+    #[test]
+    fn schedule_entries_follow_moved_and_deleted_profiles() {
+        let mut settings = Settings {
+            profiles: vec![Profile::default(), Profile::default(), Profile::default()],
+            ..Default::default()
+        };
+        let target = |index| ScheduleEntry {
+            time: ScheduleTime::default(),
+            target: ScheduleTarget::Profile { index },
+        };
+        settings.schedule.entries = vec![target(0), target(1), target(2)];
+        settings.move_profile(0, 2);
+        let indices = |settings: &Settings| {
+            settings
+                .schedule
+                .entries
+                .iter()
+                .map(|entry| match entry.target {
+                    ScheduleTarget::Profile { index } => index,
+                    ScheduleTarget::Level { .. } => usize::MAX,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(indices(&settings), [2, 0, 1]);
+        settings.delete_profile(0);
+        assert_eq!(indices(&settings), [1, 0]);
     }
     #[test]
     fn templates_from_earlier_builds_load_as_profiles() {

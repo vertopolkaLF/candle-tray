@@ -1,10 +1,10 @@
-//! System-wide shortcuts that apply profiles.
+//! System-wide shortcuts: profiles, brightness steps and turning displays off.
 //!
 //! Shortcuts are registered with `RegisterHotKey` on the tray thread, which
 //! already pumps the tray's messages. `WM_HOTKEY` arrives as a thread
 //! message (no window), so [`observe_message`] picks it out of the pump and
 //! the tray loop consumes it with [`take_pressed`]. The hotkey and recorder
-//! logic is Codex Minibar's, extended from one shortcut to one per profile.
+//! logic is Codex Minibar's, extended from one shortcut to one per action.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -130,7 +130,25 @@ pub fn pressed_now() -> Option<Hotkey> {
     None
 }
 
-/// Registration outcome of one profile's shortcut, shown in Settings.
+/// What a shortcut does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Action {
+    /// Apply the profile at this index.
+    Profile(usize),
+    BrightnessUp,
+    BrightnessDown,
+    TurnOff,
+}
+
+impl Action {
+    /// Brightness steps repeat while the keys are held; everything else
+    /// fires once per press.
+    fn repeats(self) -> bool {
+        matches!(self, Self::BrightnessUp | Self::BrightnessDown)
+    }
+}
+
+/// Registration outcome of one shortcut, shown in Settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Status {
     #[default]
@@ -140,21 +158,23 @@ pub enum Status {
     Unavailable,
 }
 
-/// Shortcuts by profile index, as the settings last asked for them.
-static DESIRED: Mutex<Vec<Option<Hotkey>>> = Mutex::new(Vec::new());
+/// Shortcuts as the settings last asked for them.
+static DESIRED: Mutex<Vec<(Action, Option<Hotkey>)>> = Mutex::new(Vec::new());
 static DIRTY: AtomicBool = AtomicBool::new(false);
-static STATUS: Mutex<Vec<Status>> = Mutex::new(Vec::new());
-/// Profile indices whose shortcut was pressed, oldest first.
-static PRESSED: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+static STATUS: Mutex<Vec<(Action, Status)>> = Mutex::new(Vec::new());
+/// Action of each registered hotkey id, by `id - HOTKEY_ID_BASE`.
+static REGISTERED: Mutex<Vec<Action>> = Mutex::new(Vec::new());
+/// Actions whose shortcut was pressed, oldest first.
+static PRESSED: Mutex<Vec<Action>> = Mutex::new(Vec::new());
 /// Set while Settings records a shortcut, so pressing an existing one
-/// records it instead of applying its profile.
+/// records it instead of running its action.
 static SUSPENDED: AtomicBool = AtomicBool::new(false);
 
-/// Hotkey ids are this base plus the profile index.
+/// Hotkey ids are this base plus the position in [`DESIRED`].
 const HOTKEY_ID_BASE: i32 = 0x4354; // "CT"
 
-/// Publish the shortcuts of every profile, in profile order.
-pub fn set_desired(hotkeys: Vec<Option<Hotkey>>) {
+/// Publish every shortcut the settings define.
+pub fn set_desired(hotkeys: Vec<(Action, Option<Hotkey>)>) {
     let mut desired = DESIRED.lock().unwrap_or_else(|e| e.into_inner());
     if *desired != hotkeys {
         *desired = hotkeys;
@@ -163,12 +183,13 @@ pub fn set_desired(hotkeys: Vec<Option<Hotkey>>) {
     }
 }
 
-pub fn status(index: usize) -> Status {
+pub fn status(action: Action) -> Status {
     STATUS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .get(index)
-        .copied()
+        .iter()
+        .find(|(known, _)| *known == action)
+        .map(|(_, status)| *status)
         .unwrap_or_default()
 }
 
@@ -179,7 +200,7 @@ pub fn set_suspended(suspended: bool) {
     }
 }
 
-/// Notes a `WM_HOTKEY` for a profile shortcut. Called by the tray's
+/// Notes a `WM_HOTKEY` for one of our shortcuts. Called by the tray's
 /// message pump for every message it removes from the queue.
 #[cfg(windows)]
 pub fn observe_message(message: &windows_sys::Win32::UI::WindowsAndMessaging::MSG) {
@@ -187,19 +208,26 @@ pub fn observe_message(message: &windows_sys::Win32::UI::WindowsAndMessaging::MS
     if message.message != WM_HOTKEY {
         return;
     }
-    if let Some(index) = (message.wParam as i32)
+    let action = (message.wParam as i32)
         .checked_sub(HOTKEY_ID_BASE)
         .and_then(|index| usize::try_from(index).ok())
-    {
+        .and_then(|index| {
+            REGISTERED
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(index)
+                .copied()
+        });
+    if let Some(action) = action {
         PRESSED
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(index);
+            .push(action);
     }
 }
 
-/// Profiles whose shortcut was pressed since the last call.
-pub fn take_pressed() -> Vec<usize> {
+/// Actions whose shortcut was pressed since the last call.
+pub fn take_pressed() -> Vec<Action> {
     std::mem::take(&mut *PRESSED.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
@@ -222,27 +250,30 @@ impl Registration {
         let desired = DESIRED.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let suspended = SUSPENDED.load(Ordering::SeqCst);
         let mut statuses = Vec::with_capacity(desired.len());
-        for (index, hotkey) in desired.iter().enumerate() {
+        let mut actions = Vec::with_capacity(desired.len());
+        for (index, (action, hotkey)) in desired.iter().enumerate() {
+            actions.push(*action);
             let status = match hotkey.filter(Hotkey::is_valid) {
                 None => Status::Off,
                 // Recording keeps the last known status on display.
-                Some(_) if suspended => status(index),
+                Some(_) if suspended => status(*action),
                 Some(hotkey) => {
                     let id = HOTKEY_ID_BASE + index as i32;
-                    if register(id, hotkey) {
+                    if register(id, hotkey, action.repeats()) {
                         self.registered.push(id);
                         Status::Active
                     } else {
                         crate::logger::info(format!(
-                            "Profile shortcut {} is already in use by another application",
+                            "Shortcut {} is already in use by another application",
                             hotkey.label()
                         ));
                         Status::Unavailable
                     }
                 }
             };
-            statuses.push(status);
+            statuses.push((*action, status));
         }
+        *REGISTERED.lock().unwrap_or_else(|e| e.into_inner()) = actions;
         let mut current = STATUS.lock().unwrap_or_else(|e| e.into_inner());
         let changed = *current != statuses;
         *current = statuses;
@@ -264,11 +295,11 @@ impl Drop for Registration {
 }
 
 #[cfg(windows)]
-fn register(id: i32, hotkey: Hotkey) -> bool {
+fn register(id: i32, hotkey: Hotkey, repeats: bool) -> bool {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
     };
-    let mut modifiers = MOD_NOREPEAT;
+    let mut modifiers = if repeats { 0 } else { MOD_NOREPEAT };
     if hotkey.ctrl {
         modifiers |= MOD_CONTROL;
     }
@@ -293,7 +324,7 @@ fn unregister(id: i32) {
 }
 
 #[cfg(not(windows))]
-fn register(_id: i32, _hotkey: Hotkey) -> bool {
+fn register(_id: i32, _hotkey: Hotkey, _repeats: bool) -> bool {
     false
 }
 
