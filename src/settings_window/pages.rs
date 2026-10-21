@@ -11,6 +11,20 @@ use crate::settings::{
     BackdropBrightness, Language, MonitorSettings, PopupMaterial, SLIDER_STEPS, Theme, TrayIcon,
 };
 
+/// VCP codes displays use for brightness, offered as overrides.
+const BRIGHTNESS_VCPS: [u8; 4] = [0x10, 0x13, 0x6B, 0x12];
+
+fn vcp_label(code: u8) -> String {
+    let name = match code {
+        0x10 => " · Luminance",
+        0x13 => " · Backlight",
+        0x6B => " · Backlight (white)",
+        0x12 => " · Contrast",
+        _ => "",
+    };
+    format!("0x{code:02X}{name}")
+}
+
 /// Update intervals offered while dragging, in milliseconds.
 const UPDATE_INTERVALS: [u32; 5] = [50, 100, 250, 500, 1000];
 
@@ -572,6 +586,52 @@ impl SettingsWindow {
             }
             let details_text = kit::text(details, 14.0, k.theme.text_secondary).into_any_element();
 
+            // DDC/CI displays may answer brightness on a nonstandard code.
+            let vcp_row = (matches!(row.monitor.backend, BrightnessBackend::Ddc { .. })
+                || row.settings.brightness_vcp.is_some())
+            .then(|| {
+                let mut codes: Vec<u8> = BRIGHTNESS_VCPS
+                    .iter()
+                    .copied()
+                    .filter(|code| {
+                        row.monitor.vcp_codes.is_empty() || row.monitor.vcp_codes.contains(code)
+                    })
+                    .collect();
+                if let Some(code) = row.settings.brightness_vcp
+                    && !codes.contains(&code)
+                {
+                    codes.push(code);
+                }
+                let mut labels = vec![tr("monitors-vcp-auto")];
+                labels.extend(
+                    codes
+                        .iter()
+                        .map(|code| SharedString::from(vcp_label(*code))),
+                );
+                let selected = row
+                    .settings
+                    .brightness_vcp
+                    .and_then(|code| codes.iter().position(|known| *known == code))
+                    .map_or(0, |index| index + 1);
+                let vcp_id = id.clone();
+                kit::dropdown_row(
+                    k,
+                    &format!("vcp-{id}"),
+                    tr("monitors-vcp"),
+                    Some(&crate::i18n::tr("monitors-vcp-description")),
+                    labels,
+                    selected as i32,
+                    false,
+                    Self::h(cx, move |this, index: usize, _, cx| {
+                        let id = vcp_id.clone();
+                        let vcp = index.checked_sub(1).and_then(|i| codes.get(i).copied());
+                        this.edit(cx, move |settings| {
+                            settings.monitors.entry(id).or_default().brightness_vcp = vcp;
+                        });
+                    }),
+                )
+            });
+
             let card = kit::card_of(k, |k| {
                 let mut rows = vec![
                     Row::new(format!("name-row-{id}"), tr("monitors-rename"))
@@ -584,6 +644,7 @@ impl SettingsWindow {
                 rows.extend(contrast);
                 rows.extend(inputs);
                 rows.extend(input_rows);
+                rows.extend(vcp_row);
                 rows.push(
                     Row::new(format!("order-row-{id}"), tr("monitors-order"))
                         .trailing(order)

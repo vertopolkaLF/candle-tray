@@ -194,3 +194,6 @@ automation-location-detecting = Определяем…
 automation-location-found = Местоположение обновлено
 automation-location-denied = Разрешите доступ к местоположению для классических приложений в параметрах Windows или введите его вручную
 automation-location-failed = Не удалось определить местоположение, введите его вручную
+monitors-vcp = Код яркости
+monitors-vcp-description = Код DDC/CI VCP, которым задаётся яркость. Меняйте, только если ползунок не влияет на этот дисплей.
+monitors-vcp-auto = Автоматически

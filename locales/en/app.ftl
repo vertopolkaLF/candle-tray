@@ -194,3 +194,6 @@ automation-location-detecting = Detecting…
 automation-location-found = Location updated
 automation-location-denied = Turn on location access for desktop apps in Windows Settings, or enter it by hand
 automation-location-failed = Location could not be detected; enter it by hand
+monitors-vcp = Brightness code
+monitors-vcp-description = The DDC/CI VCP code used for brightness. Change it only if the slider does nothing on this display.
+monitors-vcp-auto = Automatic
