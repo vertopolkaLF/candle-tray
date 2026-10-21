@@ -292,6 +292,11 @@ pub struct MonitorSettings {
     pub last_contrast: Option<u8>,
     /// Show input source buttons in the flyout (DDC/CI VCP 0x60).
     pub show_inputs: bool,
+    /// User names of input sources, keyed by the VCP 0x60 value in hex
+    /// ("0F"); TOML keys must be strings.
+    pub input_names: BTreeMap<String, String>,
+    /// Input sources left out of the flyout.
+    pub hidden_inputs: Vec<u8>,
 }
 
 impl Default for MonitorSettings {
@@ -305,7 +310,35 @@ impl Default for MonitorSettings {
             show_contrast: false,
             last_contrast: None,
             show_inputs: false,
+            input_names: BTreeMap::new(),
+            hidden_inputs: Vec::new(),
         }
+    }
+}
+
+impl MonitorSettings {
+    /// Key of an input source in [`Self::input_names`].
+    pub fn input_key(value: u8) -> String {
+        format!("{value:02X}")
+    }
+
+    /// The user's name for an input source, or its standard name.
+    pub fn input_name(&self, value: u8) -> String {
+        self.input_names
+            .get(&Self::input_key(value))
+            .map(|name| name.trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::monitors::input_label(value))
+    }
+
+    /// Input sources the flyout shows, in the display's order.
+    pub fn visible_inputs(&self, inputs: &[u8]) -> Vec<u8> {
+        inputs
+            .iter()
+            .copied()
+            .filter(|value| !self.hidden_inputs.contains(value))
+            .collect()
     }
 }
 
@@ -774,7 +807,15 @@ mod tests {
         settings
             .monitors
             .insert("a".into(), MonitorSettings::default());
-        settings.monitors.get_mut("a").unwrap().show_inputs = true;
+        let monitor = settings.monitors.get_mut("a").unwrap();
+        monitor.show_inputs = true;
+        monitor
+            .input_names
+            .insert(MonitorSettings::input_key(0x0f), "Dock".into());
+        monitor.hidden_inputs.push(0x12);
+        assert_eq!(monitor.input_name(0x0f), "Dock");
+        assert_eq!(monitor.input_name(0x11), "HDMI 1");
+        assert_eq!(monitor.visible_inputs(&[0x0f, 0x11, 0x12]), [0x0f, 0x11]);
         let raw = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&raw).unwrap(), settings);
         assert_eq!(settings.schedule.location(), Some((55.75, 37.62)));

@@ -179,3 +179,4 @@ automation-idle-busy-description = Не затемнять, пока видео,
 monitors-inputs = Переключение входов
 monitors-inputs-description = Показывать в окне кнопки входов этого дисплея.
 monitors-inputs-available = Доступны: { $inputs }.
+monitors-input-current = Текущий вход

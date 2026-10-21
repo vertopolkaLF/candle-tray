@@ -7,7 +7,9 @@ use gpui::{
 use super::kit::{self, Button, Kit, Row, SliderRange};
 use super::window::SettingsWindow;
 use crate::monitors::{BrightnessBackend, MonitorKind};
-use crate::settings::{BackdropBrightness, Language, PopupMaterial, SLIDER_STEPS, Theme, TrayIcon};
+use crate::settings::{
+    BackdropBrightness, Language, MonitorSettings, PopupMaterial, SLIDER_STEPS, Theme, TrayIcon,
+};
 
 /// Update intervals offered while dragging, in milliseconds.
 const UPDATE_INTERVALS: [u32; 5] = [50, 100, 250, 500, 1000];
@@ -364,7 +366,7 @@ impl SettingsWindow {
                     .monitor
                     .inputs
                     .iter()
-                    .map(|value| crate::monitors::input_label(*value))
+                    .map(|value| row.settings.input_name(*value))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let description = if available.is_empty() {
@@ -390,6 +392,77 @@ impl SettingsWindow {
                     }),
                 )
             });
+
+            // One row per input source while switching is on: rename, hide.
+            let mut input_rows = Vec::new();
+            if row.settings.show_inputs {
+                for value in row.monitor.inputs.clone() {
+                    let name_id = id.clone();
+                    let input = self.input(
+                        format!("input-name-{id}-{value}"),
+                        row.settings
+                            .input_names
+                            .get(&MonitorSettings::input_key(value))
+                            .map(String::as_str)
+                            .unwrap_or(""),
+                        crate::monitors::input_label(value),
+                        window,
+                        cx,
+                        move |this, text, _, _, cx| {
+                            let id = name_id.clone();
+                            let name = text.trim().to_owned();
+                            this.edit(cx, move |settings| {
+                                let names =
+                                    &mut settings.monitors.entry(id).or_default().input_names;
+                                if name.is_empty() {
+                                    names.remove(&MonitorSettings::input_key(value));
+                                } else {
+                                    names.insert(MonitorSettings::input_key(value), name);
+                                }
+                            });
+                        },
+                    );
+                    let field = kit::text_field(k, &input, Some(160.0), window, cx);
+                    let visible_id = id.clone();
+                    let visible = kit::toggle(
+                        k,
+                        format!("input-visible-{id}-{value}"),
+                        !row.settings.hidden_inputs.contains(&value),
+                        false,
+                        Self::h(cx, move |this, shown: bool, _, cx| {
+                            let id = visible_id.clone();
+                            this.edit(cx, move |settings| {
+                                let hidden =
+                                    &mut settings.monitors.entry(id).or_default().hidden_inputs;
+                                hidden.retain(|known| *known != value);
+                                if !shown {
+                                    hidden.push(value);
+                                }
+                            });
+                        }),
+                    );
+                    let mut input_row = Row::new(
+                        format!("input-row-{id}-{value}"),
+                        crate::monitors::input_label(value),
+                    );
+                    if row.monitor.input == Some(value) {
+                        input_row = input_row.description(k, tr("monitors-input-current"));
+                    }
+                    input_rows.push(
+                        input_row
+                            .trailing(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(12.0))
+                                    .child(field)
+                                    .child(visible)
+                                    .into_any_element(),
+                            )
+                            .render(k),
+                    );
+                }
+            }
 
             let min_id = id.clone();
             let min = row.settings.min;
@@ -510,6 +583,7 @@ impl SettingsWindow {
                 ];
                 rows.extend(contrast);
                 rows.extend(inputs);
+                rows.extend(input_rows);
                 rows.push(
                     Row::new(format!("order-row-{id}"), tr("monitors-order"))
                         .trailing(order)

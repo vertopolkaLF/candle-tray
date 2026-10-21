@@ -179,3 +179,4 @@ automation-idle-busy-description = Stay bright while a video, a presentation or 
 monitors-inputs = Input switching
 monitors-inputs-description = Show buttons for this display's inputs in the flyout.
 monitors-inputs-available = Available: { $inputs }.
+monitors-input-current = Current input

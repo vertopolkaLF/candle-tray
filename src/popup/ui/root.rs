@@ -1399,7 +1399,10 @@ impl PopupRoot {
             ));
         }
         // Input switching is per display, so it stays while levels are linked.
-        if row.settings.show_inputs && row.monitor.inputs.len() > 1 {
+        if row.settings.show_inputs
+            && row.monitor.inputs.len() > 1
+            && !row.settings.visible_inputs(&row.monitor.inputs).is_empty()
+        {
             card = card.child(self.input_chips(row, enabled, cx));
         }
         card.into_any_element()
@@ -1415,7 +1418,7 @@ impl PopupRoot {
     ) -> AnyElement {
         let palette = self.palette.clone();
         let mut chips = Vec::with_capacity(row.monitor.inputs.len());
-        for value in row.monitor.inputs.clone() {
+        for value in row.settings.visible_inputs(&row.monitor.inputs) {
             let current = row.monitor.input == Some(value);
             let key = format!("input-{}-{value}", row.monitor.id);
             let hover_id = fx::key(("input", key.as_str()));
@@ -1453,7 +1456,7 @@ impl PopupRoot {
                             model.update(cx, |model, cx| model.set_input(&id, value, cx));
                         })
                     })
-                    .child(SharedString::from(crate::monitors::input_label(value)))
+                    .child(SharedString::from(row.settings.input_name(value)))
                     .into_any_element(),
             );
         }
