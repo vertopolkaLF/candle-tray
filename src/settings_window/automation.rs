@@ -297,6 +297,10 @@ impl SettingsWindow {
             ]
         }));
         page.extend(self.triggers_section(k, &s.triggers, &profile_names, window, cx));
+        // Only machines with a light sensor (or a setting left on) see it.
+        if crate::light_sensor::available_cached() == Some(true) || s.adaptive.enabled {
+            page.extend(self.adaptive_section(k, s.adaptive, cx));
+        }
         page
     }
 
@@ -344,6 +348,64 @@ impl SettingsWindow {
             });
         })
         .detach();
+    }
+
+    /// Brightness that follows the ambient light sensor.
+    fn adaptive_section(
+        &mut self,
+        k: &mut Kit,
+        adaptive: crate::settings::AdaptiveBrightness,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let dark = kit::slider(
+            k,
+            "adaptive-dark",
+            f32::from(adaptive.dark_level),
+            PERCENT,
+            200.0,
+            Self::h(cx, |this, value: f32, _, cx| {
+                let level = value.round().clamp(0.0, 100.0) as u8;
+                this.edit(cx, move |settings| settings.adaptive.dark_level = level);
+            }),
+        );
+        let dark = with_value(k, dark, adaptive.dark_level);
+        let bright = kit::slider(
+            k,
+            "adaptive-bright",
+            f32::from(adaptive.bright_level),
+            PERCENT,
+            200.0,
+            Self::h(cx, |this, value: f32, _, cx| {
+                let level = value.round().clamp(0.0, 100.0) as u8;
+                this.edit(cx, move |settings| settings.adaptive.bright_level = level);
+            }),
+        );
+        let bright = with_value(k, bright, adaptive.bright_level);
+        vec![
+            kit::section_heading(k, tr("automation-section-adaptive")),
+            kit::card_of(k, |k| {
+                vec![
+                    kit::toggle_row(
+                        k,
+                        "adaptive-enabled",
+                        tr("automation-adaptive"),
+                        Some(tr("automation-adaptive-description")),
+                        adaptive.enabled,
+                        Self::h(cx, |this, value: bool, _, cx| {
+                            this.edit(cx, move |settings| settings.adaptive.enabled = value)
+                        }),
+                    ),
+                    Row::new("adaptive-dark-row", tr("automation-adaptive-dark"))
+                        .description(k, tr("automation-adaptive-dark-description"))
+                        .trailing(dark)
+                        .render(k),
+                    Row::new("adaptive-bright-row", tr("automation-adaptive-bright"))
+                        .description(k, tr("automation-adaptive-bright-description"))
+                        .trailing(bright)
+                        .render(k),
+                ]
+            }),
+        ]
     }
 
     /// Profiles switched on by the foreground app or the power source.

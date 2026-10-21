@@ -39,6 +39,8 @@ fn run() -> Result<()> {
         None => popup::show_near_cursor(),
     });
 
+    // Probe for a light sensor off the UI thread, so Settings knows at once.
+    std::thread::spawn(candle_tray::light_sensor::available);
     let store = SettingsStore::open(&path)?;
     store.edit(|settings| {
         if let Err(error) = candle_tray::autostart::reconcile(settings) {

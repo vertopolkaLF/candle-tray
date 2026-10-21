@@ -220,6 +220,27 @@ pub struct ScheduleEntry {
     pub target: ScheduleTarget,
 }
 
+/// Follow the ambient light sensor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AdaptiveBrightness {
+    pub enabled: bool,
+    /// Slider level in a dark room (about 5 lux).
+    pub dark_level: u8,
+    /// Slider level in bright light (about 1000 lux and more).
+    pub bright_level: u8,
+}
+
+impl Default for AdaptiveBrightness {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dark_level: 20,
+            bright_level: 100,
+        }
+    }
+}
+
 /// What switches a profile on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "when", rename_all = "snake_case")]
@@ -423,6 +444,7 @@ pub struct Settings {
     pub schedule: Schedule,
     /// Profiles applied by the foreground app or the power source.
     pub triggers: Vec<ProfileTrigger>,
+    pub adaptive: AdaptiveBrightness,
 }
 
 impl Default for Settings {
@@ -450,6 +472,7 @@ impl Default for Settings {
             idle_dim: IdleDim::default(),
             schedule: Schedule::default(),
             triggers: Vec::new(),
+            adaptive: AdaptiveBrightness::default(),
         }
     }
 }

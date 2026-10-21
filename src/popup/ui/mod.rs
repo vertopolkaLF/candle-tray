@@ -308,15 +308,7 @@ fn handle_command(
             let _ = model.update(cx, |model, cx| model.on_power_source(on_battery, cx));
         }
         PopupCommand::AmbientLight { lux } => {
-            // Only diagnostics until the model opts into adaptive brightness.
-            static LAST_LOG: std::sync::Mutex<Option<std::time::Instant>> =
-                std::sync::Mutex::new(None);
-            if let Ok(mut last) = LAST_LOG.lock()
-                && last.is_none_or(|time| time.elapsed() >= std::time::Duration::from_secs(30))
-            {
-                *last = Some(std::time::Instant::now());
-                crate::logger::info(format!("Ambient light: {lux:.1} lux"));
-            }
+            let _ = model.update(cx, |model, cx| model.on_ambient_light(lux, cx));
         }
         PopupCommand::Run(job) => {
             let _ = cx.update(|cx| job(cx));

@@ -106,6 +106,7 @@ impl AppModel {
         }
         publish_hotkeys(&settings);
         crate::tray::set_scroll_enabled(settings.tray_scroll);
+        crate::light_sensor::set_enabled(settings.adaptive.enabled);
         Self {
             monitors: Vec::new(),
             settings,
@@ -1027,6 +1028,36 @@ impl AppModel {
         }
     }
 
+    /// A new smoothed reading from the ambient light sensor.
+    pub fn on_ambient_light(&mut self, lux: f32, cx: &mut Context<Self>) {
+        let config = self.settings.adaptive;
+        // Dimmed for inactivity or held by an app trigger: those win.
+        if !config.enabled
+            || !self.loaded
+            || self.idle_dimmed.is_some()
+            || self.app_trigger.is_some()
+        {
+            return;
+        }
+        let level = crate::light_sensor::lux_to_level(lux, config.dark_level, config.bright_level);
+        let differ: Vec<String> = self
+            .controllable_ids()
+            .into_iter()
+            .filter(|id| self.slider_of(id) != Some(level))
+            .collect();
+        if differ.is_empty() {
+            return;
+        }
+        crate::logger::info(format!("Adaptive brightness: {lux:.0} lux -> {level}"));
+        // The sensor takes over from a schedule fade.
+        self.freeze_fade();
+        for id in differ {
+            self.apply_level(&id, level);
+        }
+        self.save();
+        cx.notify();
+    }
+
     /// The computer switched between battery and mains power.
     pub fn on_power_source(&mut self, on_battery: bool, cx: &mut Context<Self>) {
         // The state at startup is not a switch.
@@ -1261,6 +1292,7 @@ impl AppModel {
         let now = &self.settings;
         publish_hotkeys(now);
         crate::tray::set_scroll_enabled(now.tray_scroll);
+        crate::light_sensor::set_enabled(now.adaptive.enabled);
         if now.update_interval_ms != before.update_interval_ms {
             self.service.send(Command::SetThrottle(throttle(now)));
         }

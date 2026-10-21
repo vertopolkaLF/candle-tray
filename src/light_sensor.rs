@@ -28,6 +28,19 @@ pub fn available() -> bool {
     }
 }
 
+/// What [`available`] found, without probing: `None` before the first probe.
+/// Safe on the UI thread.
+pub fn available_cached() -> Option<bool> {
+    #[cfg(windows)]
+    {
+        platform::available_cached()
+    }
+    #[cfg(not(windows))]
+    {
+        Some(false)
+    }
+}
+
 /// A light subscription. Create/drop on the same non-UI thread (normally tray).
 /// Drop suppresses in-flight callbacks, revokes the event and releases WinRT.
 pub struct Watcher {
@@ -134,6 +147,13 @@ mod platform {
 
     // 0 = not probed, 1 = absent/unavailable, 2 = present.
     static AVAILABLE: AtomicU8 = AtomicU8::new(0);
+
+    pub(super) fn available_cached() -> Option<bool> {
+        match AVAILABLE.load(Ordering::Acquire) {
+            0 => None,
+            state => Some(state == 2),
+        }
+    }
 
     pub(super) fn available() -> bool {
         if AVAILABLE.load(Ordering::Acquire) == 0 {
