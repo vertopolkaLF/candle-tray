@@ -27,6 +27,51 @@ and creates a Start Menu shortcut. For the portable version, extract the ZIP
 and run `candle-tray.exe`; no separate asset folder is required.
 Uninstalling preserves your settings silently.
 
+## Command line
+
+Use one command per invocation (values accept both `--option value` and
+`--option=value`):
+
+```text
+candle-tray.exe --set 50 [--display <selector>]
+candle-tray.exe --offset -10 [--display <selector>]
+candle-tray.exe --contrast 70 [--display <selector>]
+candle-tray.exe --profile "Night"
+candle-tray.exe --off
+candle-tray.exe --input HDMI1 --display <selector>
+candle-tray.exe --show
+```
+
+The selector defaults to `all`: all visible displays. It can also be a 1-based
+position in the popup's configured display order, an exact display ID, or a
+case-insensitive substring of the display name (including a custom name).
+An exact ID wins over a name match; a substring selects every matching display.
+Hidden displays are excluded. Brightness and contrast values are 0?100;
+offsets are signed integer percentage points, clamped to 0?100 per display.
+Brightness uses the popup slider scale, including configured min/max mapping
+and SDR white level while HDR is active. Contrast requires per-display opt-in.
+Unavailable controls/displays are skipped and logged.
+
+Profiles accept a case-insensitive full name or a 1-based profile number.
+Duplicate names are rejected. `--off` uses the configured power-off method.
+Input switching requires an explicit selector and accepts `HDMI1`, `HDMI2`,
+`DP1`, `DP2`, `USB-C`, or a nonzero hexadecimal VCP 0x60 value such as `0x11`.
+The display must support DDC/CI input switching; raw values are forwarded even
+when absent from its advertised input list.
+
+Twinkle Tray spellings `--MonitorNum=2`, `--MonitorID=<exact-id>`, `--All`,
+`--Set=50`, and `--Offset=-10` are also accepted, with either value form.
+For example: `candle-tray.exe --MonitorNum 2 --Offset -10`.
+
+Commands are sent to the running instance using a JSON `WM_COPYDATA` payload;
+they do not open the popup unless `--show` is used. A plain second launch still
+opens the popup. If Candle Tray is not running, it starts normally and queues
+hardware commands until the first monitor snapshot. Unknown arguments, invalid
+values, conflicting commands/selectors, and forwarding failures exit nonzero.
+Execution is asynchronous: successful forwarding acknowledges queueing, not
+hardware completion. Selection/control failures are written to
+`%APPDATA%\Candle Tray\log.txt` and do not change the sender's exit status.
+
 ## Build
 
 Install Rust 1.95.0 and Visual Studio C++ Build Tools with the Windows SDK.

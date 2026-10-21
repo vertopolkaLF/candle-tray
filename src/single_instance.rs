@@ -6,14 +6,12 @@ use anyhow::Result;
 #[cfg(windows)]
 mod platform {
     use super::*;
+    use crate::cli::Command;
     use anyhow::{Context, ensure};
     use std::{
+        collections::VecDeque,
         ptr,
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
-            mpsc,
-        },
+        sync::{Arc, Mutex, mpsc},
         thread,
         time::Duration,
     };
@@ -22,14 +20,18 @@ mod platform {
             CloseHandle, ERROR_ALREADY_EXISTS, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND,
             LPARAM, LRESULT, WPARAM,
         },
-        System::{LibraryLoader::GetModuleHandleW, Threading::CreateMutexW},
+        System::{
+            DataExchange::COPYDATASTRUCT, LibraryLoader::GetModuleHandleW, Threading::CreateMutexW,
+        },
         UI::WindowsAndMessaging::*,
     };
     const CLASS: &str = "CandleTray.Activation";
-    type Callback = Arc<dyn Fn() + Send + Sync>;
+    const PAYLOAD_TAG: usize = 0x434e4431; // CND1, command protocol version 1.
+    const MAX_PAYLOAD: usize = 64 * 1024;
+    type Callback = Arc<dyn Fn(Option<Command>) + Send + Sync>;
     struct ContextData {
         callback: Mutex<Option<Callback>>,
-        pending: AtomicBool,
+        pending: Mutex<VecDeque<Option<Command>>>,
         message: u32,
     }
     pub struct SingleInstance {
@@ -41,10 +43,21 @@ mod platform {
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(Some(0)).collect()
     }
-    pub fn acquire() -> Result<Option<SingleInstance>> {
-        acquire_named("Local\\CandleTray.SingleInstance", CLASS)
+    pub fn acquire(command: Option<&Command>) -> Result<Option<SingleInstance>> {
+        acquire_named("Local\\CandleTray.SingleInstance", CLASS, command)
     }
-    fn acquire_named(mutex_name: &str, class_name: &str) -> Result<Option<SingleInstance>> {
+    fn acquire_named(
+        mutex_name: &str,
+        class_name: &str,
+        command: Option<&Command>,
+    ) -> Result<Option<SingleInstance>> {
+        let payload = command.map(serde_json::to_vec).transpose()?;
+        ensure!(
+            payload
+                .as_ref()
+                .is_none_or(|bytes| bytes.len() <= MAX_PAYLOAD),
+            "CLI payload too large"
+        );
         let message = unsafe { RegisterWindowMessageW(wide(class_name).as_ptr()) };
         ensure!(
             message != 0,
@@ -70,11 +83,37 @@ mod platform {
                         )
                     };
                     if !window.is_null() {
-                        ensure!(
-                            unsafe { PostMessageW(window, message, 0, 0) } != 0,
-                            "post activation: {}",
-                            std::io::Error::last_os_error()
-                        );
+                        if let Some(payload) = payload.as_ref() {
+                            let data = COPYDATASTRUCT {
+                                dwData: PAYLOAD_TAG,
+                                cbData: payload.len() as u32,
+                                lpData: payload.as_ptr() as *mut _,
+                            };
+                            let mut accepted = 0;
+                            // COPYDATA owns the cross-process copy only during
+                            // this synchronous call; the receiver deserializes it.
+                            let sent = unsafe {
+                                SendMessageTimeoutW(
+                                    window,
+                                    WM_COPYDATA,
+                                    0,
+                                    &data as *const _ as isize,
+                                    SMTO_ABORTIFHUNG | SMTO_BLOCK,
+                                    3000,
+                                    &mut accepted,
+                                )
+                            };
+                            ensure!(
+                                sent != 0 && accepted == 1,
+                                "running instance did not accept CLI command"
+                            );
+                        } else {
+                            ensure!(
+                                unsafe { PostMessageW(window, message, 0, 0) } != 0,
+                                "post activation: {}",
+                                std::io::Error::last_os_error()
+                            );
+                        }
                         return Ok(None);
                     }
                     thread::sleep(Duration::from_millis(20));
@@ -88,7 +127,7 @@ mod platform {
         }
         let context = Arc::new(ContextData {
             callback: Mutex::new(None),
-            pending: AtomicBool::new(false),
+            pending: Mutex::new(VecDeque::new()),
             message,
         });
         let data = context.clone();
@@ -193,25 +232,48 @@ mod platform {
             }
         }
         let data = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *const ContextData;
-        if !data.is_null() && message == unsafe { (*data).message } {
+        if !data.is_null() {
             let data = unsafe { &*data };
-            if wp == 0 {
-                data.pending.store(true, Ordering::Release);
-            }
-            let callback = data
-                .callback
-                .lock()
-                .expect("activation callback lock")
-                .clone();
-            if let Some(callback) = callback
-                && data.pending.swap(false, Ordering::AcqRel)
-            {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback()));
-                if result.is_err() {
-                    crate::logger::error("Activation callback panicked");
+            if message == WM_COPYDATA {
+                if lp == 0 {
+                    return 0;
+                }
+                let payload = unsafe { &*(lp as *const COPYDATASTRUCT) };
+                if payload.dwData != PAYLOAD_TAG
+                    || payload.cbData == 0
+                    || payload.cbData as usize > MAX_PAYLOAD
+                    || payload.lpData.is_null()
+                {
+                    return 0;
+                }
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(payload.lpData.cast::<u8>(), payload.cbData as usize)
+                };
+                match serde_json::from_slice::<Command>(bytes) {
+                    Ok(command) => {
+                        data.pending
+                            .lock()
+                            .expect("activation queue lock")
+                            .push_back(Some(command));
+                        deliver_pending(data);
+                        return 1;
+                    }
+                    Err(error) => {
+                        crate::logger::error(format!("Invalid CLI payload: {error}"));
+                        return 0;
+                    }
                 }
             }
-            return 0;
+            if message == data.message {
+                if wp == 0 {
+                    data.pending
+                        .lock()
+                        .expect("activation queue lock")
+                        .push_back(None);
+                }
+                deliver_pending(data);
+                return 0;
+            }
         }
         if message == WM_CLOSE {
             unsafe {
@@ -227,17 +289,43 @@ mod platform {
         }
         unsafe { DefWindowProcW(window, message, wp, lp) }
     }
-    impl SingleInstance {
-        pub fn acquire() -> Result<Option<Self>> {
-            acquire()
+    fn deliver_pending(data: &ContextData) {
+        let callback = data
+            .callback
+            .lock()
+            .expect("activation callback lock")
+            .clone();
+        if let Some(callback) = callback {
+            let pending = std::mem::take(&mut *data.pending.lock().expect("activation queue lock"));
+            for command in pending {
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(command)));
+                if result.is_err() {
+                    crate::logger::error("Activation callback panicked");
+                }
+            }
         }
-        pub fn set_activation_callback(&self, callback: impl Fn() + Send + Sync + 'static) {
+    }
+    impl SingleInstance {
+        pub fn acquire(command: Option<&Command>) -> Result<Option<Self>> {
+            acquire(command)
+        }
+        pub fn set_activation_callback(
+            &self,
+            callback: impl Fn(Option<Command>) + Send + Sync + 'static,
+        ) {
             *self
                 .context
                 .callback
                 .lock()
                 .expect("activation callback lock") = Some(Arc::new(callback));
-            if self.context.pending.load(Ordering::Acquire) {
+            if !self
+                .context
+                .pending
+                .lock()
+                .expect("activation queue lock")
+                .is_empty()
+            {
                 unsafe {
                     PostMessageW(self.window as HWND, self.context.message, 1, 0);
                 }
@@ -263,6 +351,73 @@ mod platform {
     mod tests {
         use super::*;
         #[test]
+        fn commands_queue_in_order_before_hook_and_forward_after_hook() {
+            let namespace = format!(
+                "CandleTray.PayloadTest.{}.{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap()
+            );
+            let mutex = format!("Local\\{namespace}");
+            let primary = acquire_named(&mutex, &namespace, None).unwrap().unwrap();
+            let commands = [
+                Command::Profile("????".into()),
+                Command::Offset(-10, crate::cli::Selector::All),
+            ];
+            for command in &commands {
+                assert!(
+                    acquire_named(&mutex, &namespace, Some(command))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            let (tx, rx) = mpsc::channel();
+            primary.set_activation_callback(move |command| {
+                tx.send(command).unwrap();
+            });
+            for command in &commands {
+                assert_eq!(
+                    rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+                    Some(command.clone())
+                );
+            }
+            assert!(rx.try_recv().is_err());
+            assert!(
+                acquire_named(&mutex, &namespace, Some(&Command::Off))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+                Some(Command::Off)
+            );
+            // Invalid payloads are rejected without enqueueing a command.
+            let bytes = b"not JSON";
+            let payload = COPYDATASTRUCT {
+                dwData: PAYLOAD_TAG,
+                cbData: bytes.len() as u32,
+                lpData: bytes.as_ptr() as *mut _,
+            };
+            let accepted = unsafe {
+                SendMessageW(
+                    primary.window as HWND,
+                    WM_COPYDATA,
+                    0,
+                    &payload as *const _ as isize,
+                )
+            };
+            assert_eq!(accepted, 0);
+            assert!(rx.try_recv().is_err());
+            assert!(
+                acquire_named(
+                    &mutex,
+                    &namespace,
+                    Some(&Command::Profile("x".repeat(MAX_PAYLOAD)))
+                )
+                .is_err()
+            );
+        }
+
+        #[test]
         fn secondary_activates_the_window_thread_and_guard_releases_ownership() {
             let namespace = format!(
                 "CandleTray.Test.{}.{}",
@@ -270,12 +425,12 @@ mod platform {
                 chrono::Utc::now().timestamp_nanos_opt().unwrap()
             );
             let mutex = format!("Local\\{namespace}");
-            let primary = acquire_named(&mutex, &namespace).unwrap().unwrap();
+            let primary = acquire_named(&mutex, &namespace, None).unwrap().unwrap();
             // The primary window exists before acquire returns. Activation before
             // hook registration is retained until the hook can deliver it.
-            assert!(acquire_named(&mutex, &namespace).unwrap().is_none());
+            assert!(acquire_named(&mutex, &namespace, None).unwrap().is_none());
             let (tx, rx) = mpsc::channel();
-            primary.set_activation_callback(move || {
+            primary.set_activation_callback(move |_| {
                 tx.send(thread::current().name().unwrap().to_owned())
                     .unwrap();
             });
@@ -283,10 +438,10 @@ mod platform {
                 rx.recv_timeout(Duration::from_secs(3)).unwrap(),
                 "candle-activation"
             );
-            assert!(acquire_named(&mutex, &namespace).unwrap().is_none());
+            assert!(acquire_named(&mutex, &namespace, None).unwrap().is_none());
             rx.recv_timeout(Duration::from_secs(3)).unwrap();
             drop(primary);
-            assert!(acquire_named(&mutex, &namespace).unwrap().is_some());
+            assert!(acquire_named(&mutex, &namespace, None).unwrap().is_some());
         }
     }
 }
@@ -295,6 +450,6 @@ pub use platform::{SingleInstance, acquire};
 #[cfg(not(windows))]
 pub struct SingleInstance;
 #[cfg(not(windows))]
-pub fn acquire() -> Result<Option<SingleInstance>> {
+pub fn acquire(_command: Option<&crate::cli::Command>) -> Result<Option<SingleInstance>> {
     anyhow::bail!("single instance requires Windows")
 }

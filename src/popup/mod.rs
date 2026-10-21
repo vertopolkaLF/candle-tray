@@ -20,6 +20,7 @@ use std::sync::{LazyLock, Mutex};
 /// Commands posted to the GPUI thread. Every variant is cheap to send from
 /// any thread; the GPUI side wakes through its foreground executor.
 pub enum PopupCommand {
+    Cli(crate::cli::Command),
     Show {
         anchor: Option<(i32, i32)>,
     },
