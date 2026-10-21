@@ -31,6 +31,7 @@ pub struct AppModel {
     pub import_offer: Option<PendingImport>,
     /// Accepted import whose name-keyed entries resolve on the next snapshot.
     import_pending: Option<PendingImport>,
+    pending_cli: Vec<crate::cli::Command>,
     /// When the user last set each display, so hardware echoes of earlier
     /// throttled writes cannot drag the slider back mid-drag.
     local_edits: HashMap<String, Instant>,
@@ -95,6 +96,7 @@ impl AppModel {
             loaded: false,
             import_offer: None,
             import_pending: None,
+            pending_cli: Vec::new(),
             local_edits: HashMap::new(),
             idle_dimmed: None,
             schedule_applied: None,
@@ -140,6 +142,9 @@ impl AppModel {
                 // the next resume restores what the user saw.
                 if self.record_unknown_levels() {
                     self.save();
+                }
+                for command in std::mem::take(&mut self.pending_cli) {
+                    self.run_cli(command, cx);
                 }
             }
             Event::Updated(monitor) => {
@@ -274,6 +279,76 @@ impl AppModel {
     }
 
     // ----- actions -----------------------------------------------------------
+
+    /// Dispatch a script command on the GPUI thread. Startup commands wait
+    /// for the first snapshot, after restore/schedule initialization.
+    pub fn run_cli(&mut self, command: crate::cli::Command, cx: &mut Context<Self>) {
+        use crate::cli::Command as Cli;
+        if command == Cli::Show {
+            crate::popup::show_near_cursor();
+            return;
+        }
+        if !self.loaded {
+            self.pending_cli.push(command);
+            return;
+        }
+        let result = (|| -> anyhow::Result<()> {
+            let selector = match &command {
+                Cli::Set(_, selector)
+                | Cli::Offset(_, selector)
+                | Cli::Contrast(_, selector)
+                | Cli::Input(_, selector) => selector,
+                Cli::Profile(query) => {
+                    let names = (0..self.settings.profiles.len())
+                        .map(|index| self.profile_name(index))
+                        .collect::<Vec<_>>();
+                    self.apply_profile(crate::cli::resolve_profile(query, &names)?, cx);
+                    return Ok(());
+                }
+                Cli::Off => {
+                    self.turn_off(cx);
+                    return Ok(());
+                }
+                Cli::Show => unreachable!(),
+            };
+            let rows = self.rows();
+            let entries = rows
+                .iter()
+                .map(|row| (row.monitor.id.as_str(), row.name.as_str()))
+                .collect::<Vec<_>>();
+            let selected = selector.resolve(&entries)?;
+            for index in selected {
+                let row = &rows[index];
+                let id = &row.monitor.id;
+                if row.monitor.unresponsive || row.monitor.powered_off {
+                    crate::logger::error(format!("CLI: display unavailable: {id}"));
+                    continue;
+                }
+                match &command {
+                    Cli::Set(value, _) if row.slider.is_some() => {
+                        self.set_brightness(id, *value, cx)
+                    }
+                    Cli::Offset(delta, _) if row.slider.is_some() => {
+                        let current = i32::from(row.slider.expect("checked slider"));
+                        self.set_brightness(
+                            id,
+                            current.saturating_add(*delta).clamp(0, 100) as u8,
+                            cx,
+                        );
+                    }
+                    Cli::Contrast(value, _) if row.contrast().is_some() => {
+                        self.set_contrast(id, *value, cx)
+                    }
+                    Cli::Input(value, _) => self.set_input(id, *value, cx),
+                    _ => crate::logger::error(format!("CLI: requested control unavailable: {id}")),
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            crate::logger::error(format!("CLI command failed: {error:#}"));
+        }
+    }
 
     /// Set one display from its slider value (0..=100, normalized).
     pub fn set_brightness(&mut self, id: &str, slider: u8, cx: &mut Context<Self>) {

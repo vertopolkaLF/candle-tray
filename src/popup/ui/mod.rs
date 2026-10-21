@@ -281,6 +281,9 @@ fn handle_command(
             let _ = window.update(cx, |root, window, cx| root.appearance_changed(window, cx));
             let _ = cx.update(|cx| cx.refresh_windows());
         }
+        PopupCommand::Cli(command) => {
+            let _ = model.update(cx, |model, cx| model.run_cli(command, cx));
+        }
         PopupCommand::Monitors(event) => {
             let _ = model.update(cx, |model, cx| model.handle_monitor_event(event, cx));
         }

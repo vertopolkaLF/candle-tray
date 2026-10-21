@@ -15,12 +15,29 @@ use gpui::AppContext;
 
 fn run() -> Result<()> {
     let path = Settings::default_path()?;
-    logger::initialize(&path)?;
-    // A second launch only asks the running instance to show its popup.
-    let Some(instance) = single_instance::acquire()? else {
+    logger::attach(&path)?;
+    let command = candle_tray::cli::parse(
+        std::env::args_os()
+            .skip(1)
+            .map(|arg| {
+                arg.into_string()
+                    .map_err(|_| anyhow::anyhow!("CLI arguments must be valid Unicode"))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    )?;
+    let Some(instance) = single_instance::acquire(command.as_ref())? else {
         return Ok(());
     };
-    instance.set_activation_callback(popup::show_near_cursor);
+    logger::initialize(&path)?;
+    // Queue the initial command before installing the hook, preserving order
+    // when second launches arrive during startup.
+    if let Some(command) = command {
+        popup::send_command(PopupCommand::Cli(command));
+    }
+    instance.set_activation_callback(|command| match command {
+        Some(command) => popup::send_command(PopupCommand::Cli(command)),
+        None => popup::show_near_cursor(),
+    });
 
     let store = SettingsStore::open(&path)?;
     store.edit(|settings| {

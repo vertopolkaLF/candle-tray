@@ -1,6 +1,7 @@
 pub mod app;
 pub mod automation;
 pub mod autostart;
+pub mod cli;
 pub mod hotkey;
 pub mod i18n;
 pub mod idle;

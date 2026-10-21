@@ -14,6 +14,20 @@ use chrono::{DateTime, Local};
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 const MAX_ARCHIVED_LOGS: usize = 10;
 
+/// Attach a short-lived CLI client to the existing log without rotating or
+/// truncating the running application's session.
+pub fn attach(settings_path: &Path) -> Result<()> {
+    let path = settings_path.with_file_name("log.txt");
+    if let Some(directory) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(directory)?;
+    }
+    let _ = LOG_PATH.set(path);
+    Ok(())
+}
+
 /// Archives the preceding `log.txt`, creates a clean one, and starts a new session.
 pub fn initialize(settings_path: &Path) -> Result<PathBuf> {
     let path = settings_path.with_file_name("log.txt");
