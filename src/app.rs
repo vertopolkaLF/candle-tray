@@ -2,7 +2,7 @@
 //! live settings and the actions every surface (popup, Settings, tray)
 //! performs on them.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -41,6 +41,10 @@ pub struct AppModel {
     schedule_applied: Option<(usize, i64)>,
     /// A schedule change fading in.
     fade: Option<Fade>,
+    /// The app trigger in effect and the levels from before it, restored
+    /// when its app leaves the foreground. Dropped when the user changes
+    /// levels in the meantime.
+    app_trigger: Option<(usize, BTreeMap<String, ProfileLevels>)>,
     service: Arc<MonitorService>,
     persist: PersistFn,
 }
@@ -99,6 +103,7 @@ impl AppModel {
             idle_dimmed: None,
             schedule_applied: None,
             fade: None,
+            app_trigger: None,
             service,
             persist,
         }
@@ -855,6 +860,98 @@ impl AppModel {
     fn interrupt_automation(&mut self) {
         self.freeze_fade();
         self.wake_displays();
+        // The user's own levels stay when the triggering app goes away.
+        self.app_trigger = None;
+    }
+
+    /// Another app came to the foreground (`exe` like `game.exe`).
+    pub fn on_foreground(&mut self, exe: &str, cx: &mut Context<Self>) {
+        let matched = self
+            .settings
+            .triggers
+            .iter()
+            .position(|trigger| trigger.matches_app(exe));
+        let active = self.app_trigger.as_ref().map(|(index, _)| *index);
+        if matched == active {
+            return;
+        }
+        // Leaving a triggering app (for another one or none) restores the
+        // levels from before the first trigger.
+        let before = self.app_trigger.take().map(|(_, levels)| levels);
+        match matched {
+            Some(index) => {
+                let levels = before.unwrap_or_else(|| self.remembered_levels());
+                let profile = self.settings.triggers[index].profile;
+                crate::logger::info(format!("Trigger: {exe} applies profile {profile}"));
+                self.apply_profile(profile, cx);
+                self.app_trigger = Some((index, levels));
+            }
+            None => {
+                if let Some(levels) = before {
+                    crate::logger::info(format!("Trigger: {exe} restores levels"));
+                    self.restore_levels(&levels);
+                    self.save();
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// The computer switched between battery and mains power.
+    pub fn on_power_source(&mut self, on_battery: bool, cx: &mut Context<Self>) {
+        let wanted = if on_battery {
+            crate::settings::TriggerCondition::OnBattery
+        } else {
+            crate::settings::TriggerCondition::OnAc
+        };
+        if let Some(profile) = self
+            .settings
+            .triggers
+            .iter()
+            .find(|trigger| trigger.condition == wanted)
+            .map(|trigger| trigger.profile)
+        {
+            crate::logger::info(format!(
+                "Trigger: power source (battery: {on_battery}) applies profile {profile}"
+            ));
+            self.apply_profile(profile, cx);
+        }
+    }
+
+    /// The levels the user chose for every controllable display, as a
+    /// profile would store them.
+    fn remembered_levels(&self) -> BTreeMap<String, ProfileLevels> {
+        self.controllable_ids()
+            .into_iter()
+            .map(|id| {
+                let entry = self.settings.monitor(&id);
+                let has_contrast = self
+                    .monitors
+                    .iter()
+                    .any(|m| m.id == id && m.contrast.is_some());
+                let levels = ProfileLevels {
+                    brightness: entry.last_brightness.or_else(|| self.slider_of(&id)),
+                    sdr: None,
+                    contrast: entry.last_contrast.filter(|_| has_contrast),
+                };
+                (id, levels)
+            })
+            .collect()
+    }
+
+    fn restore_levels(&mut self, levels: &BTreeMap<String, ProfileLevels>) {
+        let connected = self.controllable_ids();
+        for (id, saved) in levels {
+            if !connected.contains(id) {
+                continue;
+            }
+            if let Some(slider) = saved.brightness {
+                self.apply_level(id, slider);
+            }
+            if let Some(contrast) = saved.contrast {
+                self.apply_contrast(id, contrast);
+            }
+        }
     }
 
     /// Stop a fade, remembering the levels it reached.
@@ -885,8 +982,12 @@ impl AppModel {
             return false;
         };
         let key = (index, at.timestamp());
-        // While dimmed for inactivity the entry waits for the user.
-        if self.schedule_applied == Some(key) || self.idle_dimmed.is_some() {
+        // While dimmed for inactivity or while an app trigger holds its
+        // profile, the entry waits.
+        if self.schedule_applied == Some(key)
+            || self.idle_dimmed.is_some()
+            || self.app_trigger.is_some()
+        {
             return false;
         }
         let fade = if live && self.schedule_applied.is_some() {

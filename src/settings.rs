@@ -220,6 +220,47 @@ pub struct ScheduleEntry {
     pub target: ScheduleTarget,
 }
 
+/// What switches a profile on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "when", rename_all = "snake_case")]
+pub enum TriggerCondition {
+    /// An app comes to the foreground; leaving it restores the levels from
+    /// before. `exe` is the image file name, like `game.exe`.
+    App { exe: String },
+    /// The computer switches to battery power.
+    OnBattery,
+    /// The computer is plugged in.
+    OnAc,
+}
+
+impl Default for TriggerCondition {
+    fn default() -> Self {
+        Self::App { exe: String::new() }
+    }
+}
+
+/// Applies a profile when its condition comes true.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileTrigger {
+    pub condition: TriggerCondition,
+    /// Index in [`Settings::profiles`].
+    pub profile: usize,
+}
+
+impl ProfileTrigger {
+    /// The trigger is about this foreground app (case-insensitive).
+    pub fn matches_app(&self, exe: &str) -> bool {
+        match &self.condition {
+            TriggerCondition::App { exe: wanted } => {
+                let wanted = wanted.trim();
+                !wanted.is_empty() && wanted.eq_ignore_ascii_case(exe.trim())
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Levels that change by time of day.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -376,6 +417,8 @@ pub struct Settings {
     pub tray_scroll: bool,
     pub idle_dim: IdleDim,
     pub schedule: Schedule,
+    /// Profiles applied by the foreground app or the power source.
+    pub triggers: Vec<ProfileTrigger>,
 }
 
 impl Default for Settings {
@@ -402,6 +445,7 @@ impl Default for Settings {
             tray_scroll: true,
             idle_dim: IdleDim::default(),
             schedule: Schedule::default(),
+            triggers: Vec::new(),
         }
     }
 }
@@ -544,6 +588,11 @@ impl Settings {
                 *index = new;
             }
         }
+        for trigger in &mut self.triggers {
+            if let Some(new) = order.iter().position(|old| *old == trigger.profile) {
+                trigger.profile = new;
+            }
+        }
     }
 
     /// Delete a profile and the schedule entries that apply it.
@@ -560,6 +609,12 @@ impl Settings {
                 && *other > index
             {
                 *other -= 1;
+            }
+        }
+        self.triggers.retain(|trigger| trigger.profile != index);
+        for trigger in &mut self.triggers {
+            if trigger.profile > index {
+                trigger.profile -= 1;
             }
         }
     }
@@ -831,6 +886,12 @@ mod tests {
             target: ScheduleTarget::Profile { index },
         };
         settings.schedule.entries = vec![target(0), target(1), target(2)];
+        settings.triggers = (0..3)
+            .map(|profile| ProfileTrigger {
+                condition: TriggerCondition::OnBattery,
+                profile,
+            })
+            .collect();
         settings.move_profile(0, 2);
         let indices = |settings: &Settings| {
             settings
@@ -843,9 +904,27 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
+        let triggers = |settings: &Settings| {
+            settings
+                .triggers
+                .iter()
+                .map(|trigger| trigger.profile)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(indices(&settings), [2, 0, 1]);
+        assert_eq!(triggers(&settings), [2, 0, 1]);
         settings.delete_profile(0);
         assert_eq!(indices(&settings), [1, 0]);
+        assert_eq!(triggers(&settings), [1, 0]);
+        let app = ProfileTrigger {
+            condition: TriggerCondition::App {
+                exe: " Game.EXE ".into(),
+            },
+            profile: 0,
+        };
+        assert!(app.matches_app("game.exe"));
+        assert!(!app.matches_app("other.exe"));
+        assert!(!ProfileTrigger::default().matches_app(""));
     }
     #[test]
     fn templates_from_earlier_builds_load_as_profiles() {

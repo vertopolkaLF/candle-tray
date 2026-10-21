@@ -6,7 +6,9 @@ use gpui::{
 
 use super::kit::{self, Button, Kit, Row, SliderRange};
 use super::window::SettingsWindow;
-use crate::settings::{ScheduleEntry, ScheduleTarget, ScheduleTime};
+use crate::settings::{
+    ProfileTrigger, ScheduleEntry, ScheduleTarget, ScheduleTime, TriggerCondition,
+};
 
 /// Fade durations offered for schedule changes, in seconds.
 const FADES: [u32; 5] = [0, 30, 60, 300, 900];
@@ -53,6 +55,24 @@ pub(super) fn parse_offset(text: &str) -> Option<i16> {
     let text = text.trim().trim_start_matches('+').replace('\u{2212}', "-");
     let offset: i16 = text.trim().parse().ok()?;
     (-720..=720).contains(&offset).then_some(offset)
+}
+
+/// The file name of an app as Windows reports it: `C:\Games\Game.exe`
+/// and `game` both become `game.exe`.
+pub(super) fn normalize_exe(text: &str) -> String {
+    let name = text
+        .trim()
+        .trim_matches('"')
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    if name.is_empty() || name.ends_with(".exe") {
+        name
+    } else {
+        format!("{name}.exe")
+    }
 }
 
 /// Parses `55.75, 37.62` into latitude and longitude.
@@ -258,7 +278,157 @@ impl SettingsWindow {
                 ),
             ]
         }));
+        page.extend(self.triggers_section(k, &s.triggers, &profile_names, window, cx));
         page
+    }
+
+    /// Profiles switched on by the foreground app or the power source.
+    fn triggers_section(
+        &mut self,
+        k: &mut Kit,
+        triggers: &[ProfileTrigger],
+        profile_names: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut section = vec![kit::section_heading(k, tr("automation-section-triggers"))];
+        for (index, trigger) in triggers.iter().enumerate() {
+            let kind = match trigger.condition {
+                TriggerCondition::App { .. } => 0,
+                TriggerCondition::OnBattery => 1,
+                TriggerCondition::OnAc => 2,
+            };
+            let condition = kit::dropdown(
+                k,
+                format!("trigger-kind-{index}"),
+                vec![
+                    tr("automation-trigger-app"),
+                    tr("automation-trigger-battery"),
+                    tr("automation-trigger-ac"),
+                ],
+                Some(kind),
+                false,
+                180.0,
+                Self::h(cx, move |this, choice: usize, _, cx| {
+                    this.edit(cx, move |settings| {
+                        if let Some(trigger) = settings.triggers.get_mut(index) {
+                            trigger.condition = match choice {
+                                1 => TriggerCondition::OnBattery,
+                                2 => TriggerCondition::OnAc,
+                                _ => TriggerCondition::App { exe: String::new() },
+                            };
+                        }
+                    });
+                }),
+            );
+            let exe_field = match &trigger.condition {
+                TriggerCondition::App { exe } => {
+                    let input = self.input(
+                        format!("trigger-exe-{index}"),
+                        exe,
+                        "game.exe",
+                        window,
+                        cx,
+                        move |this, text, _, _, cx| {
+                            let exe = normalize_exe(&text);
+                            this.edit(cx, move |settings| {
+                                if let Some(trigger) = settings.triggers.get_mut(index) {
+                                    trigger.condition = TriggerCondition::App { exe };
+                                }
+                            });
+                        },
+                    );
+                    Some(kit::text_field(k, &input, Some(140.0), window, cx))
+                }
+                _ => None,
+            };
+            let delete = Button::icon_only(format!("trigger-delete-{index}"), "x-circle-fill")
+                .ghost()
+                .tooltip(tr("automation-delete"))
+                .on_click(Self::h(cx, move |this, (), _, cx| {
+                    this.edit(cx, move |settings| {
+                        if index < settings.triggers.len() {
+                            settings.triggers.remove(index);
+                        }
+                    });
+                }))
+                .render(k);
+            let when = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(condition)
+                .children(exe_field)
+                .child(delete)
+                .into_any_element();
+            let profile = kit::dropdown(
+                k,
+                format!("trigger-profile-{index}"),
+                profile_names
+                    .iter()
+                    .map(|name| SharedString::from(name.clone()))
+                    .collect(),
+                (trigger.profile < profile_names.len()).then_some(trigger.profile),
+                false,
+                200.0,
+                Self::h(cx, move |this, choice: usize, _, cx| {
+                    this.edit(cx, move |settings| {
+                        if let Some(trigger) = settings.triggers.get_mut(index) {
+                            trigger.profile = choice;
+                        }
+                    });
+                }),
+            );
+            let description = matches!(trigger.condition, TriggerCondition::App { .. })
+                .then(|| tr("automation-trigger-app-description"));
+            section.push(kit::card_of(k, |k| {
+                vec![
+                    Row::new(
+                        format!("trigger-when-{index}"),
+                        crate::i18n::format(
+                            "automation-trigger",
+                            &[("number", (index + 1).to_string())],
+                        ),
+                    )
+                    .description_opt(k, description)
+                    .trailing(when)
+                    .render(k),
+                    Row::new(
+                        format!("trigger-profile-row-{index}"),
+                        tr("automation-apply"),
+                    )
+                    .trailing(profile)
+                    .render(k),
+                ]
+            }));
+        }
+        let has_profiles = !profile_names.is_empty();
+        let add = Button::new("trigger-add", tr("automation-trigger-add"))
+            .accent()
+            .with_icon("plus-bold")
+            .disabled(!has_profiles)
+            .on_click(Self::h(cx, |this, (), _, cx| {
+                this.edit(cx, |settings| {
+                    settings.triggers.push(ProfileTrigger::default())
+                });
+            }))
+            .render(k);
+        section.push(kit::card_of(k, |k| {
+            vec![
+                Row::new("trigger-add-row", tr("automation-trigger-add"))
+                    .description(
+                        k,
+                        if has_profiles {
+                            tr("automation-trigger-add-description")
+                        } else {
+                            tr("automation-trigger-needs-profile")
+                        },
+                    )
+                    .trailing(add)
+                    .render(k),
+            ]
+        }));
+        section
     }
 
     fn schedule_entry(
@@ -476,6 +646,9 @@ mod tests {
         assert_eq!(parse_location("55.75, 37.62"), Some((55.75, 37.62)));
         assert_eq!(parse_location("91, 0"), None);
         assert_eq!(parse_location("55.75"), None);
+        assert_eq!(normalize_exe(r#""C:\Games\Game.EXE""#), "game.exe");
+        assert_eq!(normalize_exe("vlc"), "vlc.exe");
+        assert_eq!(normalize_exe("  "), "");
         assert_eq!(clock_text(450), "07:30");
         assert_eq!(offset_text(-15), "-15");
         assert_eq!(offset_text(30), "+30");
