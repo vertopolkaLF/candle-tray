@@ -298,6 +298,12 @@ fn handle_command(
         PopupCommand::TrayScroll(notches) => {
             let _ = model.update(cx, |model, cx| model.scroll_all(notches, cx));
         }
+        PopupCommand::Foreground { exe, fullscreen } => {
+            crate::logger::info(format!("Foreground: {exe}, fullscreen={fullscreen}"));
+        }
+        PopupCommand::PowerSource { on_battery } => {
+            crate::logger::info(format!("Power source: on_battery={on_battery}"));
+        }
         PopupCommand::Run(job) => {
             let _ = cx.update(|cx| job(cx));
         }
