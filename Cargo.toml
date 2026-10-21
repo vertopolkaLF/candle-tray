@@ -1,6 +1,6 @@
 [package]
 name = "candle-tray"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Control the brightness of your monitors from the Windows tray"
 license = "MIT"
