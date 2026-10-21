@@ -1,44 +1,121 @@
-# Candle Tray
+<p align="center">
+  <img src="assets/app-icon.png" alt="Candle Tray logo" width="256" height="256">
+</p>
 
-Candle Tray is a Windows 10/11 monitor brightness utility written in Rust with
-GPUI, and a rewrite of [Twinkle Tray](https://github.com/xanderfrangos/twinkle-tray)
-by Xander Frangos. Candle Tray is licensed under the MIT license.
+<h1 align="center">Candle Tray</h1>
+
+<p align="center">
+  <b>Free, open-source Windows tray app for monitor brightness with DDC/CI and WMI control, HDR white level, profiles, global shortcuts, a time-of-day schedule, adaptive brightness, and in-place updates.</b>
+</p>
+
+<p align="center">
+  <a href="https://github.com/vertopolkaLF/candle-tray/releases">Download</a>
+  |
+  <a href="https://github.com/vertopolkaLF/candle-tray/issues">Issues</a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/github/downloads/vertopolkalf/candle-tray/total?style=flat-square" alt="Downloads">
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-blue?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/Rust-2024-orange?style=flat-square" alt="Rust edition">
+  <img src="https://img.shields.io/badge/UI-GPUI-green?style=flat-square" alt="UI framework">
+</p>
+
+---
+
+## Overview
+
+Candle Tray puts a brightness slider for every display in the Windows notification area. It is a
+native Windows application written in Rust, with the tray popup and Settings both rendered by
+GPUI, and a rewrite of [Twinkle Tray](https://github.com/xanderfrangos/twinkle-tray) by
+Xander Frangos.
+
+<p align="center">
+  <img src="docs/media/popup.png" alt="Candle Tray popup with brightness and contrast sliders for three displays">
+</p>
 
 ## Features
 
-- Monitor brightness through DDC/CI and WMI.
-- SDR white level for HDR displays.
-- Linked brightness levels, display power-off, and level restoration.
-- Level profiles, and global shortcuts for profiles, brightness steps and
-  turning displays off. Scrolling over the tray icon changes brightness.
-- A time-of-day schedule (clock times, sunrise and sunset) with smooth
-  transitions, and dimming after a period without input.
-- Input source switching for DDC/CI displays (VCP 0x60), with custom input
-  names.
-- Profiles applied automatically while an app is in front, or when the
-  computer switches between battery and mains power.
+### Every display in one popup
+
+Click the tray icon for brightness sliders for every display: external monitors through DDC/CI
+and laptop panels through WMI. Optional contrast sliders (VCP 0x12) and input source buttons
+(VCP 0x60) can be turned on per display. HDR displays get an HDR toggle and an SDR white level
+slider. Link levels to move every display together, or turn the displays off from the popup.
+Scrolling over the tray icon changes brightness too.
+
+### Per-display settings
+
+Rename or hide displays, map the slider to a hardware minimum and maximum, give inputs your
+own names, and set a vendor brightness VCP code for displays that need one. Every setting
+applies live.
+
+<p align="center">
+  <img src="docs/media/settings-monitors.png" alt="Monitors settings page">
+</p>
+
+### Profiles
+
+Save levels for every display as a profile with its own icon and switch to it from the
+popup's bottom bar or with a global shortcut. Profiles can also be applied automatically while
+an app is in front, or when the computer switches between battery and mains power.
+
+<p align="center">
+  <img src="docs/media/settings-profiles.png" alt="Profiles settings page">
+</p>
+
+### Automation
+
+- A time-of-day schedule with clock times, sunrise and sunset (with location detection) and
+  smooth transitions.
+- Dimming after a period without input.
 - Adaptive brightness from an ambient light sensor.
-- A per-display brightness VCP code for displays that use a vendor code.
-- Command-line control for scripts (see below).
-- General and per-monitor settings that apply live.
+
+### Look and feel
+
+Light, dark or system theme, Acrylic, Mica or solid popup material, and a choice of tray
+glyphs. English and Russian interfaces.
+
+<p align="center">
+  <img src="docs/media/settings-general.png" alt="General settings page">
+</p>
+
+### More features
+
+- Global shortcuts for brightness steps, profiles and turning displays off.
+- Restoring levels after sleep and display reconnection.
+- Command-line control for scripts (see [Command line](#command-line)).
 - Twinkle Tray settings import.
-- In-place updates from GitHub Releases.
-- English and Russian interfaces.
+- Start with Windows and update in place from GitHub Releases.
+
+## Requirements
+
+- Windows 10 or Windows 11 (x64, ARM64 or x86).
+- External displays need DDC/CI enabled in their on-screen menu for hardware brightness.
 
 ## Install
 
-Download an x64, ARM64 or x86 installer or portable ZIP from
-[Releases](https://github.com/vertopolkaLF/candle-tray/releases).
-The installer uses `%LOCALAPPDATA%\Programs\Candle Tray` for the current user
-and creates a Start Menu shortcut. For the portable version, extract the ZIP
-and run `candle-tray.exe`; no separate asset folder is required.
-Uninstalling preserves your settings silently.
+1. Open the [latest release](https://github.com/vertopolkaLF/candle-tray/releases/latest).
+2. Download the installer matching your Windows architecture (`x64`, `arm64` or `x86`) and
+   run it. The installer is per-user, uses `%LOCALAPPDATA%\Programs\Candle Tray` and creates a
+   Start Menu shortcut. Uninstalling preserves your settings silently.
+3. Alternatively, download the matching portable ZIP, extract it, and run `candle-tray.exe`;
+   no separate asset folder is required.
+4. Find the icon in the notification area. If it is hidden, Windows may have tucked it under
+   the `^` overflow menu.
 
-Candle Tray checks for a new release at startup and once a day (Settings >
-About can turn this off). An update is only installed when you choose
-**Update** in the flyout or on the About page: the app downloads the portable
-ZIP for its architecture, verifies its SHA-256 and restarts into the new
-version. Both the installed and the portable version update this way.
+To bring over an existing setup, use the Twinkle Tray settings import offered by the app.
+
+## Updating
+
+Candle Tray checks for a new release at startup and once a day (Settings → About can turn this
+off). An update is only installed when you choose **Update** in the flyout or on the About
+page: the app downloads the portable ZIP for its architecture, verifies its SHA-256 and
+restarts into the new version. Both the installed and the portable version update this way.
+
+<p align="center">
+  <img src="docs/media/settings-about.png" alt="About page with update controls">
+</p>
 
 ## Command line
 
@@ -85,7 +162,7 @@ Execution is asynchronous: successful forwarding acknowledges queueing, not
 hardware completion. Selection/control failures are written to
 `%APPDATA%\Candle Tray\log.txt` and do not change the sender's exit status.
 
-## Build
+## Build from source
 
 Install Rust 1.95.0 and Visual Studio C++ Build Tools with the Windows SDK.
 ARM64 packaging also needs the ARM64 C++ tools and Clang (used by dependencies).
@@ -111,17 +188,20 @@ NSIS 3.11 is used from PATH, the standard installation directory, or `.tools/`.
 If absent, the script downloads its ZIP using curl's `--ssl-no-revoke` to work
 around this machine's Schannel revocation lookup failures; TLS certificate
 verification remains enabled. The portable-only command does not require NSIS.
-Regenerate the committed icons offline with `.\tools\generate-icon.ps1` once
-Cargo dependencies have been cached. The renderer uses the original tray SVG.
+Regenerate the committed icons from `assets/app-icon.svg` offline with
+`.\tools\generate-icon.ps1` once Cargo dependencies have been cached.
 
 CI checks formatting on Ubuntu and runs Clippy and tests on Windows. Manually
-run the Release workflow to build both architectures and create a draft GitHub
-release with four assets; publication is a separate action.
+run the Release workflow to build every architecture and create a draft GitHub
+release with an installer and a portable ZIP for each; publication is a separate
+action.
 
-## Settings and import
+## Settings
 
 Settings are stored in `%APPDATA%\Candle Tray\settings.toml`, including when
-running the portable executable. Use the Twinkle Tray settings import offered
-by the app to bring over supported settings from an existing installation.
+running the portable executable.
 
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for acknowledgements.
+## License
+
+Licensed under the [MIT License](LICENSE). See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for acknowledgements.

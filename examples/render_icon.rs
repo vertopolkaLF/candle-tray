@@ -1,4 +1,4 @@
-//! Regenerate the Windows application icon from the tray SVG using cached resvg.
+//! Regenerate the Windows application icon from `assets/app-icon.svg` using cached resvg.
 use std::{env, fs, io, path::PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -6,16 +6,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PathBuf::from(env::args_os().nth(1).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "pass the repository root")
         })?);
-    let source = fs::read_to_string(root.join("assets/tray/candle-light.svg"))?;
-    let body = source
-        .split_once('>')
-        .and_then(|(_, rest)| rest.rsplit_once("</svg>"))
-        .map(|(body, _)| body)
-        .ok_or("invalid tray SVG")?;
-    // 22% corner radius; inset the original 32px artwork into a 192px square.
-    let svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect width="256" height="256" rx="56.32" fill="#1F1F1F"/><g transform="translate(32 32) scale(6)">{body}</g></svg>"##
-    );
+    let svg = fs::read_to_string(root.join("assets/app-icon.svg"))?;
     let tree = resvg::usvg::Tree::from_str(&svg, &resvg::usvg::Options::default())?;
     let mut images = Vec::new();
     for size in [16_u32, 20, 24, 32, 40, 48, 64, 256] {
