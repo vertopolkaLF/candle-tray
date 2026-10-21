@@ -124,7 +124,12 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
     TRAY_THREAD.store(current_thread_id(), Ordering::SeqCst);
     // Registered from this thread so WM_HOTKEY reaches its message pump.
     let mut hotkeys = crate::hotkey::Registration::default();
-    let mut watchers = crate::foreground::Registration::new()?;
+    // Profile triggers only; the tray keeps working without them.
+    let mut watchers = crate::foreground::Registration::new()
+        .map_err(|error| {
+            crate::logger::error(format!("could not watch the foreground app: {error:#}"))
+        })
+        .ok();
     let mut wheel = WheelHook::default();
     loop {
         // The theme and power-source checks share this timer; other inputs
@@ -132,7 +137,9 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
         let active = popup::is_visible();
         popup::wait_for_messages(Duration::from_millis(if active { 16 } else { 1000 }));
         popup::pump_messages();
-        watchers.poll();
+        if let Some(watchers) = &mut watchers {
+            watchers.poll();
+        }
 
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
             match event {

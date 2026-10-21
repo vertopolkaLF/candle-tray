@@ -46,6 +46,8 @@ pub struct AppModel {
     /// when its app leaves the foreground. Dropped when the user changes
     /// levels in the meantime.
     app_trigger: Option<(usize, BTreeMap<String, ProfileLevels>)>,
+    /// Last reported power source (on battery); the first report only sets it.
+    on_battery: Option<bool>,
     service: Arc<MonitorService>,
     persist: PersistFn,
 }
@@ -106,6 +108,7 @@ impl AppModel {
             schedule_applied: None,
             fade: None,
             app_trigger: None,
+            on_battery: None,
             service,
             persist,
         }
@@ -974,6 +977,14 @@ impl AppModel {
 
     /// The computer switched between battery and mains power.
     pub fn on_power_source(&mut self, on_battery: bool, cx: &mut Context<Self>) {
+        // The state at startup is not a switch.
+        if self
+            .on_battery
+            .replace(on_battery)
+            .is_none_or(|was| was == on_battery)
+        {
+            return;
+        }
         let wanted = if on_battery {
             crate::settings::TriggerCondition::OnBattery
         } else {
