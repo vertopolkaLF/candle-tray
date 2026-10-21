@@ -46,7 +46,7 @@ impl Throttle {
     }
 }
 enum Work {
-    Probe(Box<Target>, Arc<Vec<Target>>),
+    Probe(Box<Target>, Arc<Vec<Target>>, Option<u8>),
     Capabilities,
     /// Re-read levels through the open handles, keeping the last known value
     /// of any read that fails.
@@ -75,6 +75,8 @@ struct Slot {
     busy: Option<(u64, Instant, Duration)>,
     throttle: Throttle,
     refresh: Option<(Target, Arc<Vec<Target>>)>,
+    /// Last enumeration data, retained for a single-display re-probe.
+    discovery: Option<(Target, Arc<Vec<Target>>)>,
     capabilities: bool,
     /// Requested DDC power state, not yet written.
     power: Option<bool>,
@@ -88,6 +90,12 @@ struct Slot {
     active: bool,
 }
 impl Slot {
+    fn reprobe(&mut self) {
+        self.refresh = self.discovery.clone();
+        self.read = false;
+        self.awaiting_probe = !self.monitor.unresponsive;
+        self.capabilities = true;
+    }
     /// Nothing in flight and nothing waiting to be dispatched.
     fn idle(&self) -> bool {
         self.busy.is_none()
@@ -139,11 +147,45 @@ struct Handles {
 fn percent(current: u32, max: u32) -> u8 {
     (u64::from(current) * 100 / u64::from(max.max(1))).min(100) as u8
 }
+/// Try the override once, then keep the normal fallback order.
+fn probe_brightness(
+    model: &str,
+    vcp: Option<u8>,
+    mut read: impl FnMut(u8) -> Option<(u32, u32)>,
+) -> Option<(u8, u32, u32)> {
+    vcp.into_iter()
+        .chain(
+            rules::brightness_codes(model)
+                .into_iter()
+                .filter(|code| Some(*code) != vcp),
+        )
+        .find_map(|code| read(code).map(|(current, maximum)| (code, current, maximum)))
+}
+
+fn set_brightness_vcp(
+    overrides: &mut HashMap<MonitorId, u8>,
+    slots: &mut HashMap<MonitorId, Slot>,
+    id: MonitorId,
+    vcp: Option<u8>,
+) {
+    if overrides.get(&id).copied() == vcp {
+        return;
+    }
+    if let Some(code) = vcp {
+        overrides.insert(id.clone(), code);
+    } else {
+        overrides.remove(&id);
+    }
+    if let Some(slot) = slots.get_mut(&id).filter(|slot| slot.active) {
+        slot.reprobe();
+    }
+}
+
 fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
     let mut state: Option<Handles> = None;
     while let Ok(request) = receiver.recv() {
         match request.work {
-            Work::Probe(target, targets) => {
+            Work::Probe(target, targets, brightness_vcp) => {
                 let mut target = *target;
                 // Releasing/reacquiring handles stays on this worker, behind any
                 // previous call. Never close a handle still executing in a driver.
@@ -171,13 +213,14 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                 } else {
                     let ddc = ddc::Ddc::acquire(&target, &targets);
                     if let Some(d) = &ddc {
-                        for code in rules::brightness_codes(&target.monitor.model) {
-                            if let Some((current, maximum)) = d.read(code) {
-                                max = maximum;
-                                target.monitor.backend = BrightnessBackend::Ddc { vcp: code };
-                                target.monitor.brightness = Some(percent(current, max));
-                                break;
-                            }
+                        if let Some((code, current, maximum)) =
+                            probe_brightness(&target.monitor.model, brightness_vcp, |code| {
+                                d.read(code)
+                            })
+                        {
+                            max = maximum;
+                            target.monitor.backend = BrightnessBackend::Ddc { vcp: code };
+                            target.monitor.brightness = Some(percent(current, max));
                         }
                         target.monitor.contrast = d.read(CONTRAST).map(|(current, maximum)| {
                             contrast_max = maximum;
@@ -204,6 +247,10 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                     let monitor = &mut h.target.monitor;
                     monitor.supports_ddc_power = rules::has_power(&capabilities);
                     monitor.inputs = rules::input_sources(&capabilities);
+                    monitor.vcp_codes = rules::vcp_features(&capabilities)
+                        .into_iter()
+                        .map(|(code, _)| code)
+                        .collect();
                     // The low byte is the source; some displays set flags above it.
                     monitor.input = (!monitor.inputs.is_empty())
                         .then(|| ddc.read(INPUT))
@@ -348,6 +395,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
         .ok();
     let (replies, completed) = mpsc::channel::<Reply>();
     let mut slots = HashMap::<String, Slot>::new();
+    let mut brightness_vcps = HashMap::<MonitorId, u8>::new();
     let mut sequence = 0u64;
     let mut throttle = Duration::from_millis(100);
     let epoch = Instant::now();
@@ -403,6 +451,9 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                     }
                 }
                 Ok(Command::SetThrottle(value)) => throttle = value,
+                Ok(Command::SetBrightnessVcp { id, vcp }) => {
+                    set_brightness_vcp(&mut brightness_vcps, &mut slots, id, vcp);
+                }
                 Ok(Command::SetBrightness { id, percent }) => {
                     if let Some(s) = slots.get_mut(&id).filter(|s| s.active) {
                         s.throttle.set(Level::Brightness, percent);
@@ -527,6 +578,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                                 busy: None,
                                 throttle: Throttle::default(),
                                 refresh: None,
+                                discovery: None,
                                 capabilities: false,
                                 power: None,
                                 hdr: None,
@@ -536,13 +588,8 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                                 active: true,
                             }
                         });
-                        slot.refresh = Some((target.clone(), targets.clone()));
-                        slot.read = false;
-                        slot.awaiting_probe = true;
-                        slot.capabilities = true;
-                        if slot.monitor.unresponsive {
-                            slot.awaiting_probe = false;
-                        }
+                        slot.discovery = Some((target.clone(), targets.clone()));
+                        slot.reprobe();
                     }
                     snapshot = Some(
                         targets
@@ -605,7 +652,11 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
             }
             let (work, timeout) = if let Some((target, targets)) = slot.refresh.take() {
                 (
-                    Work::Probe(Box::new(target), targets),
+                    Work::Probe(
+                        Box::new(target),
+                        targets,
+                        brightness_vcps.get(&slot.monitor.id).copied(),
+                    ),
                     Duration::from_secs(15),
                 )
             } else if let Some((level, p)) = slot.throttle.take(epoch.elapsed(), throttle) {
@@ -690,6 +741,7 @@ mod tests {
                 contrast: None,
                 supports_ddc_power: false,
                 inputs: Vec::new(),
+                vcp_codes: Vec::new(),
                 input: None,
                 powered_off: false,
                 unresponsive: false,
@@ -698,6 +750,7 @@ mod tests {
             busy: None,
             throttle: Throttle::default(),
             refresh: None,
+            discovery: None,
             capabilities: false,
             power: None,
             hdr: None,
@@ -706,6 +759,62 @@ mod tests {
             awaiting_probe: true,
             active: true,
         }
+    }
+    fn discovery(monitor: Monitor) -> (Target, Arc<Vec<Target>>) {
+        let target = Target {
+            monitor,
+            adapter: Default::default(),
+            target: 0,
+            source: String::new(),
+        };
+        (target.clone(), Arc::new(vec![target]))
+    }
+    #[test]
+    fn brightness_override_precedes_rules_and_falls_back_without_duplicates() {
+        let mut tried = Vec::new();
+        let result = probe_brightness("FUS087C", Some(0x13), |code| {
+            tried.push(code);
+            (code == 0x10).then_some((30, 100))
+        });
+        assert_eq!(tried, [0x13, 0x6b, 0x10]);
+        assert_eq!(result, Some((0x10, 30, 100)));
+        tried.clear();
+        assert_eq!(
+            probe_brightness("unknown", Some(0x10), |code| {
+                tried.push(code);
+                None
+            }),
+            None
+        );
+        assert_eq!(tried, [0x10, 0x13, 0x6b, 0x12]);
+        assert_eq!(
+            probe_brightness("unknown", Some(0xe1), |_| Some((5, 10))),
+            Some((0xe1, 5, 10))
+        );
+    }
+    #[test]
+    fn override_changes_reprobe_only_the_slot_and_survive_disconnect() {
+        let mut a = slot();
+        a.discovery = Some(discovery(a.monitor.clone()));
+        a.busy = Some((7, Instant::now(), Duration::from_secs(15)));
+        let mut slots = HashMap::from([("a".into(), a), ("b".into(), slot())]);
+        let mut overrides = HashMap::new();
+        set_brightness_vcp(&mut overrides, &mut slots, "a".into(), Some(0x13));
+        assert!(slots["a"].refresh.is_some());
+        assert!(slots["a"].busy.is_some());
+        assert!(slots["b"].refresh.is_none());
+        slots.get_mut("a").unwrap().refresh = None;
+        set_brightness_vcp(&mut overrides, &mut slots, "a".into(), Some(0x13));
+        assert!(slots["a"].refresh.is_none());
+        slots.remove("a");
+        assert_eq!(overrides.get("a"), Some(&0x13));
+        let mut reconnected = slot();
+        reconnected.discovery = Some(discovery(reconnected.monitor.clone()));
+        reconnected.reprobe();
+        slots.insert("a".into(), reconnected);
+        set_brightness_vcp(&mut overrides, &mut slots, "a".into(), None);
+        assert!(!overrides.contains_key("a"));
+        assert!(slots["a"].refresh.is_some());
     }
     #[test]
     fn stuck_worker_expires_once_without_affecting_another_monitor() {

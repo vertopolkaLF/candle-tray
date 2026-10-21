@@ -101,6 +101,8 @@ pub struct Monitor {
     pub supports_ddc_power: bool,
     /// Input sources listed for VCP 0x60 in the display's capabilities.
     pub inputs: Vec<u8>,
+    /// Top-level VCP codes listed in the display capabilities, empty if unknown.
+    pub vcp_codes: Vec<u8>,
     /// Current input source, `None` when unknown.
     pub input: Option<u8>,
     /// Switched off through DDC/CI (VCP 0xD6) by this app.
@@ -167,6 +169,12 @@ pub enum Command {
     SetBrightness {
         id: MonitorId,
         percent: u8,
+    },
+    /// Prefer this brightness code and re-probe only this display. None clears
+    /// the override. Preferences persist across display re-enumeration.
+    SetBrightnessVcp {
+        id: MonitorId,
+        vcp: Option<u8>,
     },
     SetSdr {
         id: MonitorId,

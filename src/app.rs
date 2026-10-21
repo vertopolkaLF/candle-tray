@@ -96,6 +96,14 @@ impl MonitorRow {
 impl AppModel {
     pub fn new(settings: Settings, service: Arc<MonitorService>, persist: PersistFn) -> Self {
         service.send(Command::SetThrottle(throttle(&settings)));
+        for (id, entry) in &settings.monitors {
+            if entry.brightness_vcp.is_some() {
+                service.send(Command::SetBrightnessVcp {
+                    id: id.clone(),
+                    vcp: entry.brightness_vcp,
+                });
+            }
+        }
         publish_hotkeys(&settings);
         crate::tray::set_scroll_enabled(settings.tray_scroll);
         Self {
@@ -1256,6 +1264,24 @@ impl AppModel {
         if now.update_interval_ms != before.update_interval_ms {
             self.service.send(Command::SetThrottle(throttle(now)));
         }
+        for id in now.monitors.keys().chain(
+            before
+                .monitors
+                .keys()
+                .filter(|id| !now.monitors.contains_key(*id)),
+        ) {
+            let vcp = now.monitors.get(id).and_then(|entry| entry.brightness_vcp);
+            let old = before
+                .monitors
+                .get(id)
+                .and_then(|entry| entry.brightness_vcp);
+            if vcp != old {
+                self.service.send(Command::SetBrightnessVcp {
+                    id: id.clone(),
+                    vcp,
+                });
+            }
+        }
         if now.popup_material != before.popup_material {
             crate::popup::apply_popup_appearance(now.popup_material);
         }
@@ -1401,6 +1427,7 @@ mod tests {
             hdr_supported: false,
             supports_ddc_power: false,
             inputs: Vec::new(),
+            vcp_codes: Vec::new(),
             input: None,
             powered_off: false,
             unresponsive: false,

@@ -7,6 +7,8 @@
 //! - `remaps`: full id OR hardware friendly name (electron.js:2141-2153).
 //!   Full-id ranges override name ranges. Name ranges remain pending and resolve
 //!   only against a unique hardware name on the first monitor snapshot.
+//! - `userDDCBrightnessVCPs`: model (`hwid[1]`) keys, expanded to all matching
+//!   display instances on a snapshot; string codes are hexadecimal.
 //! - `order`: full ids, either strings or pre-1.18 `{id, order}` records sorted
 //!   numerically and deduplicated (electron.js:985-1005,2124-2131).
 //! - `known-displays.json`: dictionary keyed by instance, containing full monitor
@@ -161,6 +163,7 @@ pub fn load(path: &Path) -> Result<PendingImport> {
                     "names"
                         | "hideDisplays"
                         | "remaps"
+                        | "userDDCBrightnessVCPs"
                         | "order"
                         | "linkedLevelsActive"
                         | "theme"
@@ -231,6 +234,22 @@ fn path_id(value: &str) -> Option<String> {
 fn instance(value: &str) -> Option<String> {
     let key = value.split('_').next()?.trim();
     (!key.is_empty()).then(|| key.to_owned())
+}
+/// Legacy strings are hex (including bare "13"); numeric codes are decimal.
+fn brightness_vcp(value: &Value) -> Option<u8> {
+    let code = if let Some(raw) = value.as_str() {
+        let raw = raw.trim();
+        u8::from_str_radix(
+            raw.strip_prefix("0x")
+                .or_else(|| raw.strip_prefix("0X"))
+                .unwrap_or(raw),
+            16,
+        )
+        .ok()?
+    } else {
+        u8::try_from(value.as_u64()?).ok()?
+    };
+    (code != 0).then_some(code)
 }
 fn percent(value: &Value) -> Option<u8> {
     let number = value.as_f64()?;
@@ -662,6 +681,35 @@ impl PendingImport {
                 report.skipped += 1;
             }
         }
+        for (key, value) in entries(raw, "userDDCBrightnessVCPs") {
+            let Some(vcp) = brightness_vcp(value) else {
+                report.skipped += 1;
+                continue;
+            };
+            // Legacy uses the model, not the instance key used by Candle.
+            // Also accept full paths using the existing per-monitor mapping.
+            let ids: Vec<_> = if let Some(id) = path_id(key) {
+                vec![id]
+            } else {
+                monitors
+                    .iter()
+                    .filter(|monitor| monitor.model.eq_ignore_ascii_case(key))
+                    .map(|monitor| monitor.id.clone())
+                    .collect()
+            };
+            if ids.is_empty() {
+                report.unresolved += 1;
+            }
+            for id in ids {
+                settings
+                    .monitors
+                    .entry(id.clone())
+                    .or_default()
+                    .brightness_vcp = Some(vcp);
+                touched.insert(id);
+                report.fields += 1;
+            }
+        }
         // Legacy name matches first, then the new full-id scheme overrides them.
         for direct in [false, true] {
             for (key, value) in entries(raw, "remaps") {
@@ -783,10 +831,43 @@ mod tests {
             hdr_supported: false,
             supports_ddc_power: false,
             inputs: Vec::new(),
+            vcp_codes: Vec::new(),
             input: None,
             powered_off: false,
             unresponsive: false,
         }
+    }
+    #[test]
+    fn brightness_vcp_models_resolve_to_each_instance_and_paths_map_directly() {
+        let import = fixture(
+            r#"{"userDDCBrightnessVCPs":{"DEL123":"13","DISPLAY#OTHER#direct_0":"0x6B","LATER":18}}"#,
+            None,
+        );
+        let mut settings = Settings::default();
+        assert_eq!(import.apply(&mut settings).unresolved, 2);
+        assert_eq!(settings.monitors["direct"].brightness_vcp, Some(0x6b));
+        let report = import.resolve(&[display("one", "A"), display("two", "B")], &mut settings);
+        assert_eq!(report.unresolved, 1);
+        assert_eq!(settings.monitors["one"].brightness_vcp, Some(0x13));
+        assert_eq!(settings.monitors["two"].brightness_vcp, Some(0x13));
+        let mut later = display("three", "C");
+        later.model = "LATER".into();
+        import.resolve(&[later], &mut settings);
+        assert_eq!(settings.monitors["three"].brightness_vcp, Some(18));
+    }
+    #[test]
+    fn brightness_vcp_import_rejects_invalid_codes() {
+        let import = fixture(
+            r#"{"userDDCBrightnessVCPs":{"A":0,"B":256,"C":-1,"D":"GG","E":true,"F":1.5,"G":"100"}}"#,
+            None,
+        );
+        let mut settings = Settings::default();
+        let report = import.apply(&mut settings);
+        assert_eq!(report.skipped, 7);
+        assert_eq!(report.unresolved, 0);
+        assert!(settings.monitors.is_empty());
+        assert_eq!(brightness_vcp(&serde_json::json!("FF")), Some(255));
+        assert_eq!(brightness_vcp(&serde_json::json!(19)), Some(19));
     }
     #[test]
     fn electron_accelerators_map_to_windows_keys() {

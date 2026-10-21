@@ -131,6 +131,7 @@ pub(super) fn enumerate() -> windows::core::Result<Vec<Target>> {
                     hdr_supported: false,
                     supports_ddc_power: false,
                     inputs: Vec::new(),
+                    vcp_codes: Vec::new(),
                     input: None,
                     powered_off: false,
                     unresponsive: false,

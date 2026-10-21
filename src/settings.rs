@@ -319,6 +319,9 @@ pub struct MonitorSettings {
     /// User-chosen display name; `None` shows the hardware name.
     pub name: Option<String>,
     pub hidden: bool,
+    /// Preferred DDC/CI brightness VCP code; None uses automatic detection.
+    /// Unanswered overrides fall back to the normal brightness candidates.
+    pub brightness_vcp: Option<u8>,
     /// Hardware percent the slider's 0 maps to.
     pub min: u8,
     /// Hardware percent the slider's 100 maps to.
@@ -345,6 +348,7 @@ impl Default for MonitorSettings {
         Self {
             name: None,
             hidden: false,
+            brightness_vcp: None,
             min: 0,
             max: 100,
             last_brightness: None,
@@ -775,6 +779,7 @@ mod tests {
             MonitorSettings {
                 name: Some("Рабочий".into()),
                 min: 20,
+                brightness_vcp: Some(0x13),
                 ..Default::default()
             },
         );
@@ -787,6 +792,7 @@ mod tests {
         assert_eq!(settings.update_interval_ms, 100);
         assert_eq!(settings.slider_step(), 1);
         assert_eq!(settings.monitors["a"].max, 100);
+        assert_eq!(settings.monitors["a"].brightness_vcp, None);
         assert!(settings.restore_levels);
         assert!(settings.tray_scroll);
         assert_eq!(settings.shortcut_step, 10);
