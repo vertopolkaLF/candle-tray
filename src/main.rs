@@ -70,6 +70,7 @@ fn run() -> Result<()> {
         if let Some(pending) = import_offer {
             model.update(cx, |model, cx| model.offer_import(pending, cx));
         }
+        candle_tray::automation::start(model.clone(), cx);
         model
     });
 

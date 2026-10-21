@@ -36,30 +36,74 @@ pub(super) fn sdr_percent(raw: u32) -> u8 {
     ((u64::from(raw) * 80 / 1000).saturating_sub(80) / 4).min(100) as u8
 }
 
-/// Only top-level VCP tokens count; values inside a feature's parentheses do not.
-pub(super) fn has_power(capabilities: &str) -> bool {
+/// Top-level VCP codes of a capabilities string with the values listed for
+/// each, e.g. `vcp(10 60(0F 11) D6(01 04))`. Values inside a feature's
+/// parentheses are never codes themselves.
+pub(super) fn vcp_features(capabilities: &str) -> Vec<(u8, Vec<u8>)> {
     let lower = capabilities.to_ascii_lowercase();
     let Some(start) = lower.find("vcp(") else {
-        return false;
+        return Vec::new();
     };
+    let mut features: Vec<(u8, Vec<u8>)> = Vec::new();
     let mut depth = 0usize;
     let mut token = String::new();
-    for c in lower[start + 4..].chars() {
-        if depth == 0 && !c.is_ascii_hexdigit() {
-            if token == "d6" {
-                return true;
+    let flush = |token: &mut String, depth: usize, features: &mut Vec<(u8, Vec<u8>)>| {
+        // Some displays list values without spaces ("0F1112").
+        if token.len().is_multiple_of(2) {
+            for pair in token.as_bytes().chunks(2) {
+                let Some(value) = std::str::from_utf8(pair)
+                    .ok()
+                    .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                else {
+                    continue;
+                };
+                match depth {
+                    0 => features.push((value, Vec::new())),
+                    1 => {
+                        if let Some((_, values)) = features.last_mut() {
+                            values.push(value);
+                        }
+                    }
+                    _ => {}
+                }
             }
-            token.clear();
         }
+        token.clear();
+    };
+    for c in lower[start + 4..].chars() {
+        if c.is_ascii_hexdigit() {
+            token.push(c);
+            continue;
+        }
+        flush(&mut token, depth, &mut features);
         match c {
             '(' => depth += 1,
-            ')' if depth == 0 => return false,
+            ')' if depth == 0 => return features,
             ')' => depth -= 1,
-            c if depth == 0 && c.is_ascii_hexdigit() => token.push(c),
             _ => {}
         }
     }
-    token == "d6"
+    flush(&mut token, depth, &mut features);
+    features
+}
+
+/// The display lists VCP 0xD6 (power mode).
+pub(super) fn has_power(capabilities: &str) -> bool {
+    vcp_features(capabilities)
+        .iter()
+        .any(|(code, _)| *code == 0xd6)
+}
+
+/// Input sources the display lists for VCP 0x60, in its order.
+pub(super) fn input_sources(capabilities: &str) -> Vec<u8> {
+    let mut inputs = vcp_features(capabilities)
+        .into_iter()
+        .find(|(code, _)| *code == 0x60)
+        .map(|(_, values)| values)
+        .unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    inputs.retain(|value| *value != 0 && seen.insert(*value));
+    inputs
 }
 
 /// Match physical handles in their API order. QDC order is only a last resort:
@@ -130,6 +174,15 @@ mod tests {
         assert!(has_power("(vcp(10 12 D6(01 04 05)))"));
         assert!(!has_power("(vcp(10(D6) 12))"));
         assert!(!has_power("(model(D6))"));
+    }
+    #[test]
+    fn input_sources_come_from_vcp_60() {
+        let caps = "(prot(monitor)type(LCD)vcp(02 10 12 14(05 08 0B) 60( 11 12 0F)                     D6(01 04 05) DF)mccs_ver(2.1))";
+        assert_eq!(input_sources(caps), vec![0x11, 0x12, 0x0f]);
+        assert!(has_power(caps));
+        assert_eq!(input_sources("(vcp(60(0F1112)))"), vec![0x0f, 0x11, 0x12]);
+        assert!(input_sources("(vcp(10 12))").is_empty());
+        assert!(input_sources("(vcp(10(60 11)))").is_empty());
     }
     #[test]
     fn clone_order_uses_display_devices_before_qdc() {

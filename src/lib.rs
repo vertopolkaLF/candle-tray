@@ -1,4 +1,5 @@
 pub mod app;
+pub mod automation;
 pub mod autostart;
 pub mod hotkey;
 pub mod i18n;
@@ -7,6 +8,7 @@ pub mod levels;
 pub mod logger;
 pub mod monitors;
 pub mod popup;
+pub mod schedule;
 pub mod settings;
 pub mod settings_window;
 pub mod single_instance;

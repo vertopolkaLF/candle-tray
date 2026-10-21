@@ -46,7 +46,7 @@ impl Throttle {
     }
 }
 enum Work {
-    Probe(Target, Arc<Vec<Target>>),
+    Probe(Box<Target>, Arc<Vec<Target>>),
     Capabilities,
     /// Re-read levels through the open handles, keeping the last known value
     /// of any read that fails.
@@ -57,6 +57,8 @@ enum Work {
     Power(bool),
     /// Switch HDR on or off.
     Hdr(bool),
+    /// VCP 0x60: switch to this input source.
+    Input(u8),
 }
 struct Reply {
     id: String,
@@ -78,6 +80,8 @@ struct Slot {
     power: Option<bool>,
     /// Requested HDR state, not yet written.
     hdr: Option<bool>,
+    /// Requested input source, not yet written.
+    input: Option<u8>,
     /// Levels should be re-read once pending writes have landed.
     read: bool,
     awaiting_probe: bool,
@@ -92,6 +96,7 @@ impl Slot {
             && !self.capabilities
             && self.power.is_none()
             && self.hdr.is_none()
+            && self.input.is_none()
             && !self.read
     }
     fn expire(&mut self, now: Instant) -> bool {
@@ -118,6 +123,8 @@ impl Slot {
 }
 /// VCP code of the contrast control.
 const CONTRAST: u8 = 0x12;
+/// VCP code of the input source select.
+const INPUT: u8 = 0x60;
 /// Hardware handles a worker keeps between requests.
 struct Handles {
     target: Target,
@@ -136,7 +143,8 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
     let mut state: Option<Handles> = None;
     while let Ok(request) = receiver.recv() {
         match request.work {
-            Work::Probe(mut target, targets) => {
+            Work::Probe(target, targets) => {
+                let mut target = *target;
                 // Releasing/reacquiring handles stays on this worker, behind any
                 // previous call. Never close a handle still executing in a driver.
                 // A re-probe cannot read back the power state; keep what the
@@ -189,9 +197,19 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                 });
             }
             Work::Capabilities => {
-                if let Some(h) = &mut state {
-                    h.target.monitor.supports_ddc_power =
-                        h.ddc.as_ref().is_some_and(|d| d.power_supported());
+                if let Some(h) = &mut state
+                    && let Some(ddc) = &h.ddc
+                {
+                    let capabilities = ddc.capabilities().unwrap_or_default();
+                    let monitor = &mut h.target.monitor;
+                    monitor.supports_ddc_power = rules::has_power(&capabilities);
+                    monitor.inputs = rules::input_sources(&capabilities);
+                    // The low byte is the source; some displays set flags above it.
+                    monitor.input = (!monitor.inputs.is_empty())
+                        .then(|| ddc.read(INPUT))
+                        .flatten()
+                        .map(|(current, _)| (current & 0xff) as u8)
+                        .filter(|value| *value != 0);
                 }
             }
             Work::Read => {
@@ -233,6 +251,21 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                             h.target.monitor.powered_off = !on;
                         }
                         _ => log(format!("DDC power failed: {}", h.target.monitor.id)),
+                    }
+                }
+            }
+            Work::Input(value) => {
+                if let Some(h) = &mut state {
+                    // A display that switches away may stop answering, so a
+                    // failed acknowledgement is only logged.
+                    match &h.ddc {
+                        Some(ddc) if ddc.set(INPUT, u32::from(value)) => {
+                            h.target.monitor.input = Some(value);
+                        }
+                        _ => log(format!(
+                            "Input switch to 0x{value:02X} not acknowledged: {}",
+                            h.target.monitor.id
+                        )),
                     }
                 }
             }
@@ -391,6 +424,12 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                         s.hdr = Some(on);
                     }
                 }
+                Ok(Command::SetInput { id, value }) => {
+                    log(format!("Switching input of {id} to 0x{value:02X}"));
+                    if let Some(s) = slots.get_mut(&id).filter(|s| s.active) {
+                        s.input = Some(value);
+                    }
+                }
                 Ok(Command::Apply(targets)) => {
                     for t in targets {
                         if let Some(s) = slots.get_mut(&t.id).filter(|s| s.active) {
@@ -470,6 +509,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                             slot.capabilities = false;
                             slot.power = None;
                             slot.hdr = None;
+                            slot.input = None;
                             slot.read = false;
                         }
                     }
@@ -490,6 +530,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                                 capabilities: false,
                                 power: None,
                                 hdr: None,
+                                input: None,
                                 read: false,
                                 awaiting_probe: false,
                                 active: true,
@@ -563,13 +604,18 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 continue;
             }
             let (work, timeout) = if let Some((target, targets)) = slot.refresh.take() {
-                (Work::Probe(target, targets), Duration::from_secs(15))
+                (
+                    Work::Probe(Box::new(target), targets),
+                    Duration::from_secs(15),
+                )
             } else if let Some((level, p)) = slot.throttle.take(epoch.elapsed(), throttle) {
                 (Work::Write(level, p), Duration::from_secs(3))
             } else if let Some(on) = slot.power.take() {
                 (Work::Power(on), Duration::from_secs(3))
             } else if let Some(on) = slot.hdr.take() {
                 (Work::Hdr(on), Duration::from_secs(5))
+            } else if let Some(value) = slot.input.take() {
+                (Work::Input(value), Duration::from_secs(5))
             } else if slot.read && slot.throttle.pending.is_empty() {
                 // After pending writes, so the read reports what they set.
                 slot.read = false;
@@ -643,6 +689,8 @@ mod tests {
                 hdr_supported: false,
                 contrast: None,
                 supports_ddc_power: false,
+                inputs: Vec::new(),
+                input: None,
                 powered_off: false,
                 unresponsive: false,
             },
@@ -653,6 +701,7 @@ mod tests {
             capabilities: false,
             power: None,
             hdr: None,
+            input: None,
             read: false,
             awaiting_probe: true,
             active: true,

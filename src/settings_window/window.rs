@@ -27,16 +27,26 @@ pub(super) enum Tab {
     General,
     Monitors,
     Profiles,
+    Shortcuts,
+    Automation,
 }
 
 impl Tab {
-    const ALL: [Tab; 3] = [Tab::General, Tab::Monitors, Tab::Profiles];
+    const ALL: [Tab; 5] = [
+        Tab::General,
+        Tab::Monitors,
+        Tab::Profiles,
+        Tab::Shortcuts,
+        Tab::Automation,
+    ];
 
     fn label(self) -> String {
         match self {
             Tab::General => crate::i18n::tr("settings-general"),
             Tab::Monitors => crate::i18n::tr("settings-monitors"),
             Tab::Profiles => crate::i18n::tr("settings-profiles"),
+            Tab::Shortcuts => crate::i18n::tr("settings-shortcuts"),
+            Tab::Automation => crate::i18n::tr("settings-automation"),
         }
     }
 
@@ -45,6 +55,8 @@ impl Tab {
             Tab::General => "gear-six-fill",
             Tab::Monitors => "monitor-fill",
             Tab::Profiles => "sliders-horizontal-fill",
+            Tab::Shortcuts => "keyboard-fill",
+            Tab::Automation => "clock-fill",
         }
     }
 
@@ -53,6 +65,8 @@ impl Tab {
             Tab::General => "general",
             Tab::Monitors => "monitors",
             Tab::Profiles => "profiles",
+            Tab::Shortcuts => "shortcuts",
+            Tab::Automation => "automation",
         }
     }
 }
@@ -72,8 +86,8 @@ pub(crate) struct SettingsWindow {
     /// A short confirmation shown at the bottom of the page.
     pub(super) notice: Option<(SharedString, u64)>,
     notice_generation: u64,
-    /// Profile whose shortcut button is waiting for a key combination.
-    pub(super) hotkey_recording: Option<usize>,
+    /// Action whose shortcut button is waiting for a key combination.
+    pub(super) hotkey_recording: Option<crate::hotkey::Action>,
     /// The last combination pressed while recording had no modifier.
     pub(super) hotkey_rejected: bool,
     _subscriptions: Vec<Subscription>,
@@ -374,6 +388,8 @@ impl SettingsWindow {
             Tab::General => self.general_page(k, window, cx),
             Tab::Monitors => self.monitors_page(k, window, cx),
             Tab::Profiles => self.profiles_page(k, window, cx),
+            Tab::Shortcuts => self.shortcuts_page(k, window, cx),
+            Tab::Automation => self.automation_page(k, window, cx),
         });
         let body = div()
             .flex()

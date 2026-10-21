@@ -1396,7 +1396,78 @@ impl PopupRoot {
                 cx,
             ));
         }
+        // Input switching is per display, so it stays while levels are linked.
+        if row.settings.show_inputs && row.monitor.inputs.len() > 1 {
+            card = card.child(self.input_chips(row, enabled, cx));
+        }
         card.into_any_element()
+    }
+
+    /// One button per input source the display lists; the current one is
+    /// filled with the accent.
+    fn input_chips(
+        &mut self,
+        row: &MonitorRow,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette = self.palette.clone();
+        let mut chips = Vec::with_capacity(row.monitor.inputs.len());
+        for value in row.monitor.inputs.clone() {
+            let current = row.monitor.input == Some(value);
+            let key = format!("input-{}-{value}", row.monitor.id);
+            let hover_id = fx::key(("input", key.as_str()));
+            let hover = self.fx.toggle(
+                fx::key(("input-hover", key.as_str())),
+                self.hovered(hover_id),
+                fx::FASTER,
+            );
+            let (background, text) = if current {
+                (palette.accent, palette.text_on_accent)
+            } else {
+                (
+                    palette.control_fill.mix(palette.subtle_fill, hover),
+                    palette.text_primary,
+                )
+            };
+            let model = self.model.clone();
+            let id = row.monitor.id.clone();
+            chips.push(
+                div()
+                    .id(eid(key))
+                    .h(px(26.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(palette.control_radius))
+                    .bg(background)
+                    .border_1()
+                    .border_color(palette.card_stroke)
+                    .text_size(px(12.0))
+                    .text_color(text)
+                    .on_hover(self.hover_listener(hover_id, cx))
+                    .when(enabled && !current, |chip| {
+                        chip.on_click(move |_, _, cx| {
+                            model.update(cx, |model, cx| model.set_input(&id, value, cx));
+                        })
+                    })
+                    .child(SharedString::from(crate::monitors::input_label(value)))
+                    .into_any_element(),
+            );
+        }
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap(px(4.0))
+            // Line up with the slider tracks, past their leading icon.
+            .pl(px(26.0))
+            .pt(px(2.0))
+            .pb(px(6.0))
+            .when(!enabled, |row| row.opacity(0.5))
+            .children(chips)
+            .into_any_element()
     }
 
     fn render_footer(&mut self, cx: &mut Context<Self>) -> AnyElement {

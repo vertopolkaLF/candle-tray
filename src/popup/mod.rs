@@ -34,8 +34,10 @@ pub enum PopupCommand {
     /// Settings changed on another thread (or another window).
     SettingsChanged,
     OpenSettings,
-    /// A profile shortcut was pressed.
-    ApplyProfile(usize),
+    /// A global shortcut was pressed.
+    Shortcut(crate::hotkey::Action),
+    /// The wheel turned over the tray icon, in notches (up is positive).
+    TrayScroll(i32),
     /// Run on the GPUI thread with the app context (tray menu actions etc.).
     Run(Box<dyn FnOnce(&mut gpui::App) + Send>),
 }

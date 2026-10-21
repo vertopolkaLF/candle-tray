@@ -4,8 +4,13 @@
 //! hidden window must be serviced by the thread that created it). Clicks
 //! toggle the popup; the same loop polls for outside clicks and Escape while
 //! the popup is open, exactly like Codex Minibar's bridge.
+//!
+//! Windows sends no wheel input to notification icons. While the pointer
+//! rests on ours, a low-level mouse hook (installed on this thread, so its
+//! callback runs in this pump) catches the wheel; it is removed again when
+//! the pointer leaves, so it costs nothing the rest of the time.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -25,6 +30,16 @@ static TOOLTIP_LEVEL: AtomicU8 = AtomicU8::new(255);
 static ICON: AtomicU8 = AtomicU8::new(0);
 /// Win32 id of the thread running [`run`]; 0 before it starts.
 static TRAY_THREAD: AtomicU32 = AtomicU32::new(0);
+/// Scrolling over the icon changes the levels.
+static SCROLL_ENABLED: AtomicBool = AtomicBool::new(true);
+/// Wheel delta collected over the icon, in `WHEEL_DELTA` units (120 per
+/// notch); partial notches from precise wheels carry over.
+static WHEEL: AtomicI32 = AtomicI32::new(0);
+
+/// Turn scrolling over the tray icon on or off.
+pub fn set_scroll_enabled(enabled: bool) {
+    SCROLL_ENABLED.store(enabled, Ordering::SeqCst);
+}
 
 /// Rebuild the menu labels (language changed).
 pub fn refresh_menu() {
@@ -89,6 +104,7 @@ fn current_thread_id() -> u32 {
 
 const MENU_REFRESH: &str = "refresh";
 const MENU_SETTINGS: &str = "settings";
+const MENU_TURN_OFF: &str = "turn-off";
 const MENU_EXIT: &str = "exit";
 
 /// Run the tray loop on the calling thread until Exit. `on_exit` runs on
@@ -108,6 +124,7 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
     TRAY_THREAD.store(current_thread_id(), Ordering::SeqCst);
     // Registered from this thread so WM_HOTKEY reaches its message pump.
     let mut hotkeys = crate::hotkey::Registration::default();
+    let mut wheel = WheelHook::default();
     loop {
         // Idle, only the taskbar theme check needs a timer: every other
         // input arrives as a window message or a `wake`.
@@ -116,28 +133,42 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
         popup::pump_messages();
 
         while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            if let TrayIconEvent::Click {
-                position,
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                if popup::is_visible() {
-                    // A click while it is already closing (the press
-                    // dismissed it) must not reopen it.
-                    if !popup::is_closing() {
-                        popup::hide();
+            match event {
+                TrayIconEvent::Click {
+                    position,
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => {
+                    if popup::is_visible() {
+                        // A click while it is already closing (the press
+                        // dismissed it) must not reopen it.
+                        if !popup::is_closing() {
+                            popup::hide();
+                        }
+                    } else {
+                        popup::show_near(position.x as i32, position.y as i32);
                     }
-                } else {
-                    popup::show_near(position.x as i32, position.y as i32);
                 }
+                TrayIconEvent::Enter { rect, .. } if SCROLL_ENABLED.load(Ordering::SeqCst) => {
+                    wheel.watch(rect);
+                }
+                TrayIconEvent::Leave { .. } => wheel.stop(),
+                _ => {}
             }
+        }
+        let notches = WHEEL.load(Ordering::SeqCst) / WHEEL_DELTA;
+        if notches != 0 {
+            WHEEL.fetch_sub(notches * WHEEL_DELTA, Ordering::SeqCst);
+            popup::send_command(PopupCommand::TrayScroll(notches));
         }
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             match event.id.as_ref() {
                 MENU_REFRESH => on_refresh(),
                 MENU_SETTINGS => popup::send_command(PopupCommand::OpenSettings),
+                MENU_TURN_OFF => {
+                    popup::send_command(PopupCommand::Shortcut(crate::hotkey::Action::TurnOff))
+                }
                 MENU_EXIT => EXIT_REQUESTED.store(true, Ordering::SeqCst),
                 _ => {}
             }
@@ -146,10 +177,11 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
             // Settings shows whether each shortcut could be registered.
             popup::send_command(PopupCommand::Run(Box::new(|cx| cx.refresh_windows())));
         }
-        for index in crate::hotkey::take_pressed() {
-            popup::send_command(PopupCommand::ApplyProfile(index));
+        for action in crate::hotkey::take_pressed() {
+            popup::send_command(PopupCommand::Shortcut(action));
         }
         if EXIT_REQUESTED.load(Ordering::SeqCst) {
+            drop(wheel);
             drop(hotkeys);
             drop(tray);
             on_exit();
@@ -192,12 +224,107 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
     }
 }
 
+/// Mouse wheel units per notch.
+const WHEEL_DELTA: i32 = 120;
+
+/// Icon bounds in screen pixels while the wheel is watched.
+static ICON_LEFT: AtomicI32 = AtomicI32::new(0);
+static ICON_TOP: AtomicI32 = AtomicI32::new(0);
+static ICON_RIGHT: AtomicI32 = AtomicI32::new(0);
+static ICON_BOTTOM: AtomicI32 = AtomicI32::new(0);
+
+/// The low-level mouse hook that is installed while the pointer is over
+/// the icon. Lives on, and is dropped by, the tray thread.
+#[derive(Default)]
+struct WheelHook {
+    #[cfg(windows)]
+    hook: Option<windows_sys::Win32::UI::WindowsAndMessaging::HHOOK>,
+}
+
+impl WheelHook {
+    fn watch(&mut self, rect: tray_icon::Rect) {
+        let (x, y) = (rect.position.x as i32, rect.position.y as i32);
+        ICON_LEFT.store(x, Ordering::SeqCst);
+        ICON_TOP.store(y, Ordering::SeqCst);
+        ICON_RIGHT.store(x + rect.size.width as i32, Ordering::SeqCst);
+        ICON_BOTTOM.store(y + rect.size.height as i32, Ordering::SeqCst);
+        #[cfg(windows)]
+        if self.hook.is_none() {
+            use windows_sys::Win32::{
+                System::LibraryLoader::GetModuleHandleW,
+                UI::WindowsAndMessaging::{SetWindowsHookExW, WH_MOUSE_LL},
+            };
+            // SAFETY: the callback is a plain function and the hook is
+            // removed on this thread before it ends (Drop).
+            let hook = unsafe {
+                SetWindowsHookExW(
+                    WH_MOUSE_LL,
+                    Some(wheel_hook),
+                    GetModuleHandleW(std::ptr::null()),
+                    0,
+                )
+            };
+            if !hook.is_null() {
+                self.hook = Some(hook);
+            }
+        }
+    }
+
+    fn stop(&mut self) {
+        #[cfg(windows)]
+        if let Some(hook) = self.hook.take() {
+            // SAFETY: the hook was installed by this thread.
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::UnhookWindowsHookEx(hook);
+            }
+        }
+    }
+}
+
+impl Drop for WheelHook {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn wheel_hook(
+    code: i32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, HC_ACTION, MSLLHOOKSTRUCT, WM_MOUSEWHEEL,
+    };
+    if code == HC_ACTION as i32 && wparam as u32 == WM_MOUSEWHEEL {
+        // SAFETY: for WM_MOUSEWHEEL, lparam points at an MSLLHOOKSTRUCT.
+        let info = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
+        let over_icon = (ICON_LEFT.load(Ordering::SeqCst)..ICON_RIGHT.load(Ordering::SeqCst))
+            .contains(&info.pt.x)
+            && (ICON_TOP.load(Ordering::SeqCst)..ICON_BOTTOM.load(Ordering::SeqCst))
+                .contains(&info.pt.y);
+        if over_icon && SCROLL_ENABLED.load(Ordering::SeqCst) {
+            let delta = i32::from((info.mouseData >> 16) as u16 as i16);
+            WHEEL.fetch_add(delta, Ordering::SeqCst);
+        }
+    }
+    // SAFETY: passes the event on unchanged.
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+}
+
 fn make_menu() -> Result<Menu> {
     let refresh = MenuItem::with_id(MENU_REFRESH, crate::i18n::tr("tray-refresh"), true, None);
     let settings = MenuItem::with_id(MENU_SETTINGS, crate::i18n::tr("tray-settings"), true, None);
+    let turn_off = MenuItem::with_id(MENU_TURN_OFF, crate::i18n::tr("tray-turn-off"), true, None);
     let exit = MenuItem::with_id(MENU_EXIT, crate::i18n::tr("tray-exit"), true, None);
-    Menu::with_items(&[&refresh, &settings, &PredefinedMenuItem::separator(), &exit])
-        .context("create tray menu")
+    Menu::with_items(&[
+        &turn_off,
+        &refresh,
+        &settings,
+        &PredefinedMenuItem::separator(),
+        &exit,
+    ])
+    .context("create tray menu")
 }
 
 const ICON_SIZE: u32 = 32;
