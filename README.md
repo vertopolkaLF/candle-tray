@@ -46,8 +46,8 @@ The selector defaults to `all`: all visible displays. It can also be a 1-based
 position in the popup's configured display order, an exact display ID, or a
 case-insensitive substring of the display name (including a custom name).
 An exact ID wins over a name match; a substring selects every matching display.
-Hidden displays are excluded. Brightness and contrast values are 0?100;
-offsets are signed integer percentage points, clamped to 0?100 per display.
+Hidden displays are excluded. Brightness and contrast values are 0–100;
+offsets are signed integer percentage points, clamped to 0–100 per display.
 Brightness uses the popup slider scale, including configured min/max mapping
 and SDR white level while HDR is active. Contrast requires per-display opt-in.
 Unavailable controls/displays are skipped and logged.
