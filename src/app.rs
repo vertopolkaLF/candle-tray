@@ -41,7 +41,8 @@ pub struct MonitorRow {
     pub monitor: Monitor,
     pub settings: MonitorSettings,
     pub name: String,
-    /// Slider (normalized) brightness, `None` when unsupported/unknown.
+    /// The display's one level slider: normalized brightness, or the SDR
+    /// white level while HDR is on. `None` when unsupported/unknown.
     pub slider: Option<u8>,
 }
 
@@ -76,7 +77,10 @@ impl AppModel {
     pub fn handle_monitor_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Snapshot { monitors, reason } => {
-                self.monitors = monitors;
+                let previous = std::mem::replace(&mut self.monitors, monitors);
+                for old in &previous {
+                    self.carry_level(old);
+                }
                 self.loaded = true;
                 if let Some(pending) = self.import_pending.take() {
                     let before = self.settings.clone();
@@ -116,6 +120,12 @@ impl AppModel {
                     if recent && slot.contrast.is_some() {
                         slot.contrast = contrast.or(slot.contrast);
                     }
+                    let old = Monitor {
+                        brightness,
+                        sdr,
+                        ..slot.clone()
+                    };
+                    self.carry_level(&old);
                 } else {
                     self.monitors.push(monitor);
                     self.monitors.sort_by_key(|m| m.num);
@@ -123,6 +133,28 @@ impl AppModel {
             }
         }
         cx.notify();
+    }
+
+    /// HDR switched on or off since `old` (from here or from Windows): the
+    /// slider keeps its value, now driving the other level.
+    fn carry_level(&mut self, old: &Monitor) {
+        let Some(monitor) = self.monitors.iter().find(|m| m.id == old.id) else {
+            return;
+        };
+        if monitor.sdr.is_some() == old.sdr.is_some() || monitor.unresponsive {
+            return;
+        }
+        let entry = self.settings.monitor(&old.id);
+        let Some(slider) = slider_level(old, &entry).or(entry.last_brightness) else {
+            return;
+        };
+        crate::logger::info(format!(
+            "HDR switched on {}; carrying level {slider}",
+            old.id
+        ));
+        let id = old.id.clone();
+        self.apply_level(&id, slider);
+        self.save();
     }
 
     fn record_unknown_levels(&mut self) -> bool {
@@ -134,15 +166,9 @@ impl AppModel {
                 .entry(monitor.id.clone())
                 .or_default();
             if entry.last_brightness.is_none()
-                && let Some(hardware) = monitor.brightness
+                && let Some(slider) = slider_level(monitor, entry)
             {
-                entry.last_brightness = Some(levels::from_hardware(hardware, entry.min, entry.max));
-                changed = true;
-            }
-            if entry.last_sdr.is_none()
-                && let Some(sdr) = monitor.sdr
-            {
-                entry.last_sdr = Some(sdr.percent);
+                entry.last_brightness = Some(slider);
                 changed = true;
             }
             if entry.last_contrast.is_none()
@@ -176,9 +202,7 @@ impl AppModel {
                     .clone()
                     .filter(|name| !name.trim().is_empty())
                     .unwrap_or_else(|| monitor.name.clone());
-                let slider = monitor
-                    .brightness
-                    .map(|hardware| levels::from_hardware(hardware, settings.min, settings.max));
+                let slider = slider_level(monitor, &settings);
                 MonitorRow {
                     monitor: monitor.clone(),
                     settings,
@@ -212,19 +236,35 @@ impl AppModel {
 
     /// Set one display from its slider value (0..=100, normalized).
     pub fn set_brightness(&mut self, id: &str, slider: u8, cx: &mut Context<Self>) {
-        let entry = self.settings.monitors.entry(id.to_owned()).or_default();
-        let hardware = levels::to_hardware(slider, entry.min, entry.max);
-        entry.last_brightness = Some(slider);
-        if let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) {
-            monitor.brightness = Some(hardware);
-        }
-        self.local_edits.insert(id.to_owned(), Instant::now());
-        self.service.send(Command::SetBrightness {
-            id: id.to_owned(),
-            percent: hardware,
-        });
+        self.apply_level(id, slider);
         self.save();
         cx.notify();
+    }
+
+    /// Write a slider value to the level it drives: the SDR white level
+    /// while HDR is on, the hardware brightness otherwise.
+    fn apply_level(&mut self, id: &str, slider: u8) {
+        let slider = slider.min(100);
+        let entry = self.settings.monitors.entry(id.to_owned()).or_default();
+        entry.last_brightness = Some(slider);
+        let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) else {
+            return;
+        };
+        self.local_edits.insert(id.to_owned(), Instant::now());
+        if let Some(sdr) = monitor.sdr.as_mut() {
+            sdr.percent = slider;
+            self.service.send(Command::SetSdr {
+                id: id.to_owned(),
+                percent: slider,
+            });
+        } else {
+            let hardware = levels::to_hardware(slider, entry.min, entry.max);
+            monitor.brightness = Some(hardware);
+            self.service.send(Command::SetBrightness {
+                id: id.to_owned(),
+                percent: hardware,
+            });
+        }
     }
 
     /// The "All displays" slider: every visible controllable display.
@@ -236,42 +276,8 @@ impl AppModel {
             .map(|row| row.monitor.id)
             .collect();
         for id in ids {
-            let entry = self.settings.monitors.entry(id.clone()).or_default();
-            let hardware = levels::to_hardware(slider, entry.min, entry.max);
-            entry.last_brightness = Some(slider);
-            if let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) {
-                monitor.brightness = Some(hardware);
-            }
-            self.local_edits.insert(id.clone(), Instant::now());
-            self.service.send(Command::SetBrightness {
-                id,
-                percent: hardware,
-            });
+            self.apply_level(&id, slider);
         }
-        self.save();
-        cx.notify();
-    }
-
-    pub fn set_sdr(&mut self, id: &str, percent: u8, cx: &mut Context<Self>) {
-        let percent = percent.min(100);
-        self.settings
-            .monitors
-            .entry(id.to_owned())
-            .or_default()
-            .last_sdr = Some(percent);
-        if let Some(sdr) = self
-            .monitors
-            .iter_mut()
-            .find(|m| m.id == id)
-            .and_then(|m| m.sdr.as_mut())
-        {
-            sdr.percent = percent;
-        }
-        self.local_edits.insert(id.to_owned(), Instant::now());
-        self.service.send(Command::SetSdr {
-            id: id.to_owned(),
-            percent,
-        });
         self.save();
         cx.notify();
     }
@@ -409,7 +415,7 @@ impl AppModel {
             .filter_map(|row| {
                 let levels = ProfileLevels {
                     brightness: row.slider,
-                    sdr: row.monitor.sdr.map(|sdr| sdr.percent),
+                    sdr: None,
                     contrast: row.contrast(),
                 };
                 (levels != ProfileLevels::default()).then(|| (row.monitor.id.clone(), levels))
@@ -464,17 +470,18 @@ impl AppModel {
                 sdr: None,
                 contrast: None,
             };
-            if let Some(slider) = saved.brightness.filter(|_| monitor.brightness.is_some()) {
-                let hardware = levels::to_hardware(slider, entry.min, entry.max);
-                monitor.brightness = Some(hardware);
-                entry.last_brightness = Some(slider);
-                target.brightness = Some(hardware);
-            }
-            if let (Some(percent), Some(sdr)) = (saved.sdr, monitor.sdr.as_mut()) {
-                let percent = percent.min(100);
-                sdr.percent = percent;
-                entry.last_sdr = Some(percent);
-                target.sdr = Some(percent);
+            // Profiles saved before the shared slider may hold only `sdr`.
+            if let Some(slider) = saved.brightness.or(saved.sdr).map(|v| v.min(100)) {
+                if let Some(sdr) = monitor.sdr.as_mut() {
+                    sdr.percent = slider;
+                    entry.last_brightness = Some(slider);
+                    target.sdr = Some(slider);
+                } else if monitor.brightness.is_some() {
+                    let hardware = levels::to_hardware(slider, entry.min, entry.max);
+                    monitor.brightness = Some(hardware);
+                    entry.last_brightness = Some(slider);
+                    target.brightness = Some(hardware);
+                }
             }
             if let Some(percent) = saved.contrast.filter(|_| monitor.contrast.is_some()) {
                 let percent = percent.min(100);
@@ -502,15 +509,13 @@ impl AppModel {
                 continue;
             };
             let entry = self.settings.monitor(id);
-            let brightness = monitor
-                .brightness
-                .map(|hardware| levels::from_hardware(hardware, entry.min, entry.max));
             let same = |saved: Option<u8>, current: Option<u8>| {
                 saved.is_none() || current.is_none() || saved == current
             };
-            if !same(saved.brightness, brightness)
-                || !same(saved.sdr, monitor.sdr.map(|sdr| sdr.percent))
-                || !same(saved.contrast, monitor.contrast)
+            if !same(
+                saved.brightness.or(saved.sdr),
+                slider_level(monitor, &entry),
+            ) || !same(saved.contrast, monitor.contrast)
             {
                 return false;
             }
@@ -724,6 +729,17 @@ impl AppModel {
     }
 }
 
+/// The value of a display's level slider: its SDR white level while HDR is
+/// on, its normalized hardware brightness otherwise.
+fn slider_level(monitor: &Monitor, settings: &MonitorSettings) -> Option<u8> {
+    match monitor.sdr {
+        Some(sdr) => Some(sdr.percent),
+        None => monitor
+            .brightness
+            .map(|hardware| levels::from_hardware(hardware, settings.min, settings.max)),
+    }
+}
+
 /// How long a local edit outranks hardware reports for the same display.
 const LOCAL_EDIT_HOLD: Duration = Duration::from_millis(1500);
 
@@ -758,13 +774,22 @@ pub fn restore_targets(
         .filter(|monitor| !monitor.unresponsive)
         .filter_map(|monitor| {
             let entry = settings.monitors.get(&monitor.id)?;
-            let brightness = entry
-                .last_brightness
-                .map(|slider| levels::to_hardware(slider, entry.min, entry.max))
-                .filter(|hardware| monitor.brightness.is_some_and(|now| now != *hardware));
-            let sdr = entry
-                .last_sdr
-                .filter(|percent| monitor.sdr.is_some_and(|now| now.percent != *percent));
+            // The slider drives SDR while HDR is on; the backlight stays put.
+            let (brightness, sdr) = match monitor.sdr {
+                Some(now) => (
+                    None,
+                    entry
+                        .last_brightness
+                        .filter(|slider| now.percent != *slider),
+                ),
+                None => (
+                    entry
+                        .last_brightness
+                        .map(|slider| levels::to_hardware(slider, entry.min, entry.max))
+                        .filter(|hardware| monitor.brightness.is_some_and(|now| now != *hardware)),
+                    None,
+                ),
+            };
             let contrast = entry
                 .last_contrast
                 .filter(|percent| monitor.contrast.is_some_and(|now| now != *percent));
@@ -854,11 +879,11 @@ mod tests {
     }
 
     #[test]
-    fn sdr_restores_independently() {
+    fn hdr_restores_the_slider_to_sdr_only() {
         let settings = settings_with(
             "a",
             MonitorSettings {
-                last_sdr: Some(30),
+                last_brightness: Some(30),
                 ..Default::default()
             },
         );

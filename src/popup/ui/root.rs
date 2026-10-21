@@ -1010,7 +1010,8 @@ impl PopupRoot {
             let contrast = (!contrasts.is_empty())
                 .then(|| (contrasts.iter().sum::<u32>() / contrasts.len() as u32) as u8);
             sections.push(self.render_linked_card(average as u8, contrast, names, inner_width, cx));
-            for row in rows.iter().filter(|row| row.monitor.sdr.is_some()) {
+            // The HDR switch stays reachable while levels are linked.
+            for row in rows.iter().filter(|row| row.monitor.hdr_supported) {
                 sections.push(self.render_monitor_card(row, true, inner_width, cx));
             }
         } else {
@@ -1293,7 +1294,7 @@ impl PopupRoot {
     fn render_monitor_card(
         &mut self,
         row: &MonitorRow,
-        sdr_only: bool,
+        header_only: bool,
         _inner_width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1308,7 +1309,7 @@ impl PopupRoot {
                 crate::i18n::tr("popup-unresponsive").to_owned(),
                 palette.caution,
             ))
-        } else if row.slider.is_none() && !sdr_only {
+        } else if row.slider.is_none() && !header_only {
             Some((
                 crate::i18n::tr("popup-unsupported").to_owned(),
                 palette.text_tertiary,
@@ -1324,6 +1325,7 @@ impl PopupRoot {
             self.header_button(
                 ("hdr", &row.monitor.id),
                 "fluent-hdr",
+                20.0,
                 on,
                 move |_, _, cx| {
                     let target = target.clone();
@@ -1338,6 +1340,7 @@ impl PopupRoot {
             self.header_button(
                 ("power", &row.monitor.id),
                 "fluent-power",
+                16.0,
                 off,
                 move |_, _, cx| {
                     let target = target.clone();
@@ -1362,7 +1365,7 @@ impl PopupRoot {
             .section()
             .when(unresponsive, |card| card.opacity(0.7))
             .child(header);
-        if !sdr_only && let Some(value) = row.slider {
+        if !header_only && let Some(value) = row.slider {
             let model = self.model.clone();
             let id = row.monitor.id.clone();
             let on_change: slider::Handler = Rc::new(move |value, _, cx| {
@@ -1377,7 +1380,7 @@ impl PopupRoot {
                 cx,
             ));
         }
-        if !sdr_only && let Some(contrast) = row.contrast() {
+        if !header_only && let Some(contrast) = row.contrast() {
             let model = self.model.clone();
             let id = row.monitor.id.clone();
             let on_change: slider::Handler = Rc::new(move |value, _, cx| {
@@ -1392,34 +1395,7 @@ impl PopupRoot {
                 cx,
             ));
         }
-        if let Some(sdr) = row.monitor.sdr {
-            let model = self.model.clone();
-            let id = row.monitor.id.clone();
-            let on_change: slider::Handler = Rc::new(move |value, _, cx| {
-                model.update(cx, |model, cx| model.set_sdr(&id, value, cx));
-            });
-            card = card
-                .child(self.level_label("popup-sdr"))
-                .child(self.slider_row(
-                    format!("sdr-{}", row.monitor.id),
-                    "fluent-brightness",
-                    sdr.percent,
-                    enabled,
-                    on_change,
-                    cx,
-                ));
-        }
         card.into_any_element()
-    }
-
-    /// Caption above a secondary slider.
-    fn level_label(&self, key: &str) -> gpui::Div {
-        div()
-            .pt(px(4.0))
-            .text_size(px(12.0))
-            .line_height(px(16.0))
-            .text_color(self.palette.text_secondary)
-            .child(SharedString::from(crate::i18n::tr(key).to_owned()))
     }
 
     fn render_footer(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1739,6 +1715,7 @@ impl PopupRoot {
         &mut self,
         (kind, id): (&str, &str),
         glyph: &'static str,
+        glyph_size: f32,
         active: bool,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
         cx: &mut Context<Self>,
@@ -1775,7 +1752,7 @@ impl PopupRoot {
         element
             .child(icon(
                 glyph,
-                16.0,
+                glyph_size,
                 palette.text_secondary.mix(palette.accent, emphasis),
             ))
             .into_any_element()

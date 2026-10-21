@@ -169,10 +169,10 @@ pub struct MonitorSettings {
     pub min: u8,
     /// Hardware percent the slider's 100 maps to.
     pub max: u8,
-    /// Last slider (normalized) brightness, restored on startup/resume.
+    /// Last level slider value, restored on startup/resume and carried
+    /// across HDR switches: normalized brightness, or the SDR white level
+    /// while HDR is on.
     pub last_brightness: Option<u8>,
-    /// Last SDR white level percent, restored the same way.
-    pub last_sdr: Option<u8>,
     /// Show a contrast slider in the flyout (DDC/CI displays only).
     pub show_contrast: bool,
     /// Last contrast percent, restored the same way.
@@ -187,7 +187,6 @@ impl Default for MonitorSettings {
             min: 0,
             max: 100,
             last_brightness: None,
-            last_sdr: None,
             show_contrast: false,
             last_contrast: None,
         }
