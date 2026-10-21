@@ -1,14 +1,14 @@
 # Builds multi-arch portable zips and NSIS installers into dist/<version>/.
 # Usage:
 #   .\build.ps1
-#   .\build.ps1 -Arch x64,arm64
+#   .\build.ps1 -Arch x64,arm64,x86
 #   .\build.ps1 -SkipInstaller
 
 [CmdletBinding()]
 param(
     [string]$OutDir = "dist",
-    [ValidateSet("x64", "arm64")]
-    [string[]]$Arch = @("x64", "arm64"),
+    [ValidateSet("x64", "arm64", "x86")]
+    [string[]]$Arch = @("x64", "arm64", "x86"),
     [switch]$SkipInstaller
 )
 
@@ -32,6 +32,7 @@ $RuntimeFiles = @(
 $TargetMap = [ordered]@{
     x64   = "x86_64-pc-windows-msvc"
     arm64 = "aarch64-pc-windows-msvc"
+    x86   = "i686-pc-windows-msvc"
 }
 
 function Get-CargoVersion {
@@ -114,6 +115,7 @@ function Import-VisualStudioBuildEnvironment {
     $vcvarsArgument = switch ($Architecture) {
         "x64" { "x64" }
         "arm64" { "x64_arm64" }
+        "x86" { "x64_x86" }
         default { throw "Unknown architecture: $Architecture" }
     }
 

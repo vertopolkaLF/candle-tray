@@ -228,7 +228,7 @@ mod platform {
         if message == WM_NCCREATE {
             let create = unsafe { &*(lp as *const CREATESTRUCTW) };
             unsafe {
-                SetWindowLongPtrW(window, GWLP_USERDATA, create.lpCreateParams as isize);
+                SetWindowLongPtrW(window, GWLP_USERDATA, create.lpCreateParams as _);
             }
         }
         let data = unsafe { GetWindowLongPtrW(window, GWLP_USERDATA) } as *const ContextData;

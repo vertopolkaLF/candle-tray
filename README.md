@@ -27,7 +27,7 @@ by Xander Frangos. Candle Tray is licensed under the MIT license.
 
 ## Install
 
-Download an x64 or ARM64 installer or portable ZIP from
+Download an x64, ARM64 or x86 installer or portable ZIP from
 [Releases](https://github.com/vertopolkaLF/candle-tray/releases).
 The installer uses `%LOCALAPPDATA%\Programs\Candle Tray` for the current user
 and creates a Start Menu shortcut. For the portable version, extract the ZIP
@@ -103,7 +103,7 @@ The wrapper reuses the main checkout's `target/` directory in Git worktrees.
 To create release packages in `dist/<version>/`:
 
 ```powershell
-.\build.ps1 -Arch x64,arm64
+.\build.ps1 -Arch x64,arm64,x86
 .\build.ps1 -Arch x64 -SkipInstaller
 ```
 

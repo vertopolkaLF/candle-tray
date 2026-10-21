@@ -52,6 +52,8 @@ jobs:
             target: x86_64-pc-windows-msvc
           - arch: arm64
             target: aarch64-pc-windows-msvc
+          - arch: x86
+            target: i686-pc-windows-msvc
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: true
     steps:
@@ -115,8 +117,8 @@ jobs:
           $tag = "v$version"
           $assetDir = Join-Path "dist" $version
           $assets = @(Get-ChildItem -LiteralPath $assetDir -File | ForEach-Object { $_.FullName })
-          if ($assets.Count -ne 4) {
-            throw "Expected four release assets in $assetDir"
+          if ($assets.Count -ne 6) {
+            throw "Expected six release assets in $assetDir"
           }
           Write-Host "Assets:"
           $assets | ForEach-Object { Write-Host "  $_" }

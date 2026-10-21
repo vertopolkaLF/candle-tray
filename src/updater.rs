@@ -425,6 +425,8 @@ pub fn current_version() -> Version {
 fn host_arch() -> &'static str {
     if cfg!(target_arch = "aarch64") {
         "arm64"
+    } else if cfg!(target_arch = "x86") {
+        "x86"
     } else {
         "x64"
     }
