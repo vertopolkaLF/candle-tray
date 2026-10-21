@@ -121,6 +121,24 @@ impl SettingsWindow {
             },
         );
         let location_field = kit::text_field(k, &location, Some(200.0), window, cx);
+        let detect = Button::new(
+            "schedule-location-detect",
+            if self.locating {
+                tr("automation-location-detecting")
+            } else {
+                tr("automation-location-detect")
+            },
+        )
+        .disabled(self.locating)
+        .on_click(Self::h(cx, |this, (), _, cx| this.detect_location(cx)))
+        .render(k);
+        let location_controls = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(location_field)
+            .child(detect)
+            .into_any_element();
         let fade_index = FADES
             .iter()
             .position(|seconds| *seconds >= schedule.fade_seconds)
@@ -167,7 +185,7 @@ impl SettingsWindow {
                 ),
                 Row::new("schedule-location-row", tr("automation-location"))
                     .description(k, tr("automation-location-description"))
-                    .trailing(location_field)
+                    .trailing(location_controls)
                     .render(k),
             ]
         }));
@@ -280,6 +298,47 @@ impl SettingsWindow {
         }));
         page.extend(self.triggers_section(k, &s.triggers, &profile_names, window, cx));
         page
+    }
+
+    /// Ask Windows where the computer is, off the UI thread.
+    fn detect_location(&mut self, cx: &mut Context<Self>) {
+        self.locating = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async { crate::location::detect() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.locating = false;
+                match result {
+                    Ok((latitude, longitude)) => {
+                        this.edit(cx, move |settings| {
+                            settings.schedule.latitude = Some(latitude);
+                            settings.schedule.longitude = Some(longitude);
+                        });
+                        this.show_notice(tr("automation-location-found"), cx);
+                    }
+                    Err(error) => {
+                        crate::logger::error(format!("location detection failed: {error:#}"));
+                        let denied = matches!(
+                            error.downcast_ref::<crate::location::LocationError>(),
+                            Some(crate::location::LocationError::Denied)
+                        );
+                        this.show_notice(
+                            if denied {
+                                tr("automation-location-denied")
+                            } else {
+                                tr("automation-location-failed")
+                            },
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Profiles switched on by the foreground app or the power source.

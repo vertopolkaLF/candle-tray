@@ -90,6 +90,8 @@ pub(crate) struct SettingsWindow {
     pub(super) hotkey_recording: Option<crate::hotkey::Action>,
     /// The last combination pressed while recording had no modifier.
     pub(super) hotkey_rejected: bool,
+    /// Location detection is running.
+    pub(super) locating: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -147,6 +149,7 @@ impl SettingsWindow {
             notice_generation: 0,
             hotkey_recording: None,
             hotkey_rejected: false,
+            locating: false,
             _subscriptions: subscriptions,
         }
     }
