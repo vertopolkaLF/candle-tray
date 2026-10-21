@@ -153,6 +153,9 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
         .context("create tray icon")?;
     let mut next_theme_check = Instant::now();
     TRAY_THREAD.store(current_thread_id(), Ordering::SeqCst);
+    // The idle state throttles the process; this thread answers the wheel
+    // hook, which Windows silently removes if a call is slow.
+    exempt_from_throttling();
     // Registered from this thread so WM_HOTKEY reaches its message pump.
     let mut hotkeys = crate::hotkey::Registration::default();
     // Profile triggers only; the tray keeps working without them.
@@ -167,7 +170,8 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
     loop {
         // The theme and power-source checks share this timer; other inputs
         // arrive as window messages or a `wake`.
-        let active = popup::is_visible();
+        // The wheel hook also needs a quick look at whether the pointer left.
+        let active = popup::is_visible() || wheel.is_watching();
         popup::wait_for_messages(Duration::from_millis(if active { 16 } else { 1000 }));
         popup::pump_messages();
         if !crate::light_sensor::is_enabled() {
@@ -205,13 +209,18 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
                         popup::show_near(position.x as i32, position.y as i32);
                     }
                 }
-                TrayIconEvent::Enter { rect, .. } if SCROLL_ENABLED.load(Ordering::SeqCst) => {
+                // tray-icon misses some Leave events and then sends no
+                // further Enter, so every move over the icon (re)arms it.
+                TrayIconEvent::Enter { rect, .. } | TrayIconEvent::Move { rect, .. }
+                    if SCROLL_ENABLED.load(Ordering::SeqCst) =>
+                {
                     wheel.watch(rect);
                 }
                 TrayIconEvent::Leave { .. } => wheel.stop(),
                 _ => {}
             }
         }
+        wheel.stop_if_left();
         let notches = WHEEL.load(Ordering::SeqCst) / WHEEL_DELTA;
         if notches != 0 {
             WHEEL.fetch_sub(notches * WHEEL_DELTA, Ordering::SeqCst);
@@ -321,6 +330,34 @@ impl WheelHook {
         }
     }
 
+    fn is_watching(&self) -> bool {
+        #[cfg(windows)]
+        return self.hook.is_some();
+        #[cfg(not(windows))]
+        false
+    }
+
+    /// Remove the hook once the pointer is off the icon, so the next hover
+    /// installs a fresh one: Windows drops a hook that once answered slowly
+    /// without telling its owner.
+    fn stop_if_left(&mut self) {
+        #[cfg(windows)]
+        if self.hook.is_some() {
+            let mut cursor = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+            // SAFETY: writes the cursor position into a local.
+            let known =
+                unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut cursor) }
+                    != 0;
+            let inside = (ICON_LEFT.load(Ordering::SeqCst)..ICON_RIGHT.load(Ordering::SeqCst))
+                .contains(&cursor.x)
+                && (ICON_TOP.load(Ordering::SeqCst)..ICON_BOTTOM.load(Ordering::SeqCst))
+                    .contains(&cursor.y);
+            if known && !inside || !SCROLL_ENABLED.load(Ordering::SeqCst) {
+                self.stop();
+            }
+        }
+    }
+
     fn stop(&mut self) {
         #[cfg(windows)]
         if let Some(hook) = self.hook.take() {
@@ -337,6 +374,34 @@ impl Drop for WheelHook {
         self.stop();
     }
 }
+
+/// Opt this thread out of EcoQoS, which the idle state turns on for the
+/// whole process.
+#[cfg(windows)]
+fn exempt_from_throttling() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadInformation, THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE,
+        ThreadPowerThrottling,
+    };
+    let state = THREAD_POWER_THROTTLING_STATE {
+        Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    // SAFETY: passes a correctly sized struct for this information class.
+    unsafe {
+        SetThreadInformation(
+            GetCurrentThread(),
+            ThreadPowerThrottling,
+            &state as *const _ as *const _,
+            std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn exempt_from_throttling() {}
 
 #[cfg(windows)]
 unsafe extern "system" fn wheel_hook(
