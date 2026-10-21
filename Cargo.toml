@@ -35,6 +35,7 @@ tray-icon = { version = "0.24", default-features = false }
 windows = { git = "https://github.com/microsoft/windows-rs", rev = "07f344c019b8fdae4d398d4c2591596044cb416a", default-features = false, features = [
     "std",
     "Devices_Geolocation",
+    "Devices_Sensors",
     "Foundation",
     "Graphics_Effects",
     "System",
