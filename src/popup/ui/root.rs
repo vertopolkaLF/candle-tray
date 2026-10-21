@@ -1010,8 +1010,9 @@ impl PopupRoot {
             let contrast = (!contrasts.is_empty())
                 .then(|| (contrasts.iter().sum::<u32>() / contrasts.len() as u32) as u8);
             sections.push(self.render_linked_card(average as u8, contrast, names, inner_width, cx));
-            // The HDR switch stays reachable while levels are linked.
-            for row in rows.iter().filter(|row| row.monitor.hdr_supported) {
+            // Per-display switches (HDR, power) stay reachable while levels
+            // are linked.
+            for row in &rows {
                 sections.push(self.render_monitor_card(row, true, inner_width, cx));
             }
         } else {
