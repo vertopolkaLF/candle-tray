@@ -969,6 +969,9 @@ impl PopupRoot {
         let loaded = model.loaded;
         let offer = model.import_offer.is_some();
         let mut body = Vec::new();
+        if let Some(update) = crate::updater::popup_offer() {
+            body.push(self.render_update_offer(update, cx));
+        }
         if offer {
             body.push(self.render_import_offer(cx));
         }
@@ -1050,6 +1053,77 @@ impl PopupRoot {
     }
 
     /// First-run card offering to import Twinkle Tray settings.
+    fn render_update_offer(
+        &mut self,
+        phase: crate::updater::UpdatePhase,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::updater::UpdatePhase;
+        let palette = self.palette.clone();
+        let (body, buttons) = match &phase {
+            UpdatePhase::Available(update) => {
+                let install = self.text_button(
+                    "update-install",
+                    crate::i18n::tr("popup-update-install"),
+                    true,
+                    |_, _, _| crate::updater::install(),
+                    cx,
+                );
+                let later = self.text_button(
+                    "update-later",
+                    crate::i18n::tr("popup-update-later"),
+                    false,
+                    |_, _, _| crate::updater::dismiss_offer(),
+                    cx,
+                );
+                (
+                    crate::i18n::format(
+                        "popup-update-body",
+                        &[("version", update.version.clone())],
+                    ),
+                    Some(
+                        div()
+                            .pt(px(6.0))
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.0))
+                            .child(install)
+                            .child(later),
+                    ),
+                )
+            }
+            UpdatePhase::Installing {
+                progress: Some(fraction),
+                ..
+            } => (
+                crate::i18n::format(
+                    "about-update-downloading-percent",
+                    &[("percent", format!("{:.0}", fraction * 100.0))],
+                ),
+                None,
+            ),
+            UpdatePhase::Restarting => (crate::i18n::tr("about-update-restarting"), None),
+            _ => (crate::i18n::tr("about-update-downloading"), None),
+        };
+        self.card()
+            .pb(px(12.0))
+            .gap(px(4.0))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(SharedString::from(crate::i18n::tr("popup-update-title"))),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .line_height(px(16.0))
+                    .text_color(palette.text_secondary)
+                    .child(SharedString::from(body)),
+            )
+            .children(buttons)
+            .into_any_element()
+    }
+
     fn render_import_offer(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let palette = self.palette.clone();
         let accept_model = self.model.clone();

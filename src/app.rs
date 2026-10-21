@@ -110,6 +110,7 @@ impl AppModel {
         publish_hotkeys(&settings);
         crate::tray::set_scroll_enabled(settings.tray_scroll);
         crate::light_sensor::set_enabled(settings.adaptive.enabled);
+        crate::updater::set_auto_check(settings.check_for_updates);
         Self {
             monitors: Vec::new(),
             settings,
@@ -1324,6 +1325,7 @@ impl AppModel {
         publish_hotkeys(now);
         crate::tray::set_scroll_enabled(now.tray_scroll);
         crate::light_sensor::set_enabled(now.adaptive.enabled);
+        crate::updater::set_auto_check(now.check_for_updates);
         if now.update_interval_ms != before.update_interval_ms {
             self.service.send(Command::SetThrottle(throttle(now)));
         }

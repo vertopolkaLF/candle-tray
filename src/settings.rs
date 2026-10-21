@@ -445,6 +445,8 @@ pub struct Settings {
     /// Profiles applied by the foreground app or the power source.
     pub triggers: Vec<ProfileTrigger>,
     pub adaptive: AdaptiveBrightness,
+    /// Look for a new release at startup and once a day.
+    pub check_for_updates: bool,
 }
 
 impl Default for Settings {
@@ -473,6 +475,7 @@ impl Default for Settings {
             schedule: Schedule::default(),
             triggers: Vec::new(),
             adaptive: AdaptiveBrightness::default(),
+            check_for_updates: true,
         }
     }
 }

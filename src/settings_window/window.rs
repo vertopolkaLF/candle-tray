@@ -29,15 +29,17 @@ pub(super) enum Tab {
     Profiles,
     Shortcuts,
     Automation,
+    About,
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [
+    const ALL: [Tab; 6] = [
         Tab::General,
         Tab::Monitors,
         Tab::Profiles,
         Tab::Shortcuts,
         Tab::Automation,
+        Tab::About,
     ];
 
     fn label(self) -> String {
@@ -47,6 +49,7 @@ impl Tab {
             Tab::Profiles => crate::i18n::tr("settings-profiles"),
             Tab::Shortcuts => crate::i18n::tr("settings-shortcuts"),
             Tab::Automation => crate::i18n::tr("settings-automation"),
+            Tab::About => crate::i18n::tr("settings-about"),
         }
     }
 
@@ -57,6 +60,7 @@ impl Tab {
             Tab::Profiles => "sliders-horizontal-fill",
             Tab::Shortcuts => "keyboard-fill",
             Tab::Automation => "clock-fill",
+            Tab::About => "info-fill",
         }
     }
 
@@ -67,6 +71,7 @@ impl Tab {
             Tab::Profiles => "profiles",
             Tab::Shortcuts => "shortcuts",
             Tab::Automation => "automation",
+            Tab::About => "about",
         }
     }
 }
@@ -396,6 +401,7 @@ impl SettingsWindow {
             Tab::Profiles => self.profiles_page(k, window, cx),
             Tab::Shortcuts => self.shortcuts_page(k, window, cx),
             Tab::Automation => self.automation_page(k, window, cx),
+            Tab::About => self.about_page(k, cx),
         });
         let body = div()
             .flex()

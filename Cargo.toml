@@ -25,6 +25,10 @@ smallvec = "1"
 unicode-segmentation = "1"
 fluent-bundle = "0.16"
 unic-langid = "0.9"
+semver = "1"
+sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 # windows-rs is pinned to one commit so windows-core, windows and

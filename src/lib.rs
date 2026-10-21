@@ -19,3 +19,4 @@ pub mod single_instance;
 pub mod theme;
 pub mod tray;
 pub mod twinkle_import;
+pub mod updater;

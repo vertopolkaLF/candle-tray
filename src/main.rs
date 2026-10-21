@@ -29,6 +29,7 @@ fn run() -> Result<()> {
         return Ok(());
     };
     logger::initialize(&path)?;
+    candle_tray::updater::startup();
     // Queue the initial command before installing the hook, preserving order
     // when second launches arrive during startup.
     if let Some(command) = command {

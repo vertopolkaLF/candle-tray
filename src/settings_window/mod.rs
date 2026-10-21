@@ -3,6 +3,7 @@
 //! The component kit, theme, Mica backdrop and text input are Codex
 //! Minibar's; the window and its pages are Candle Tray's own.
 
+mod about;
 mod automation;
 mod backdrop;
 #[allow(dead_code)]
