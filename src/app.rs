@@ -46,6 +46,9 @@ pub struct AppModel {
     /// when its app leaves the foreground. Dropped when the user changes
     /// levels in the meantime.
     app_trigger: Option<(usize, BTreeMap<String, ProfileLevels>)>,
+    /// The last smoothed ambient light reading, applied again whenever the
+    /// sensor may lead once more (after idle, an app trigger, edits).
+    ambient_lux: Option<f32>,
     /// The app last reported in the foreground.
     foreground: Option<String>,
     /// Last reported power source (on battery); the first report only sets it.
@@ -121,6 +124,7 @@ impl AppModel {
             app_trigger: None,
             on_battery: None,
             foreground: None,
+            ambient_lux: None,
             service,
             persist,
         }
@@ -171,6 +175,9 @@ impl AppModel {
                 // Remember levels of displays seen for the first time, so
                 // the next resume restores what the user saw.
                 if self.record_unknown_levels() {
+                    self.save();
+                }
+                if first && self.apply_adaptive() {
                     self.save();
                 }
                 for command in std::mem::take(&mut self.pending_cli) {
@@ -922,6 +929,7 @@ impl AppModel {
         if self.idle_dimmed.is_some() {
             if !config.enabled || idle < threshold {
                 self.wake_displays();
+                self.apply_adaptive();
                 return true;
             }
             return false;
@@ -995,6 +1003,7 @@ impl AppModel {
                 if let Some(levels) = before {
                     crate::logger::info(format!("Trigger: {exe} restores levels"));
                     self.restore_levels(&levels);
+                    self.apply_adaptive();
                     self.save();
                     cx.notify();
                 }
@@ -1030,14 +1039,27 @@ impl AppModel {
 
     /// A new smoothed reading from the ambient light sensor.
     pub fn on_ambient_light(&mut self, lux: f32, cx: &mut Context<Self>) {
+        self.ambient_lux = Some(lux);
+        if self.apply_adaptive() {
+            self.save();
+            cx.notify();
+        }
+    }
+
+    /// Set the displays from the last light reading, unless something else
+    /// holds them. Returns whether any level changed.
+    fn apply_adaptive(&mut self) -> bool {
         let config = self.settings.adaptive;
+        let Some(lux) = self.ambient_lux else {
+            return false;
+        };
         // Dimmed for inactivity or held by an app trigger: those win.
         if !config.enabled
             || !self.loaded
             || self.idle_dimmed.is_some()
             || self.app_trigger.is_some()
         {
-            return;
+            return false;
         }
         let level = crate::light_sensor::lux_to_level(lux, config.dark_level, config.bright_level);
         let differ: Vec<String> = self
@@ -1046,7 +1068,7 @@ impl AppModel {
             .filter(|id| self.slider_of(id) != Some(level))
             .collect();
         if differ.is_empty() {
-            return;
+            return false;
         }
         crate::logger::info(format!("Adaptive brightness: {lux:.0} lux -> {level}"));
         // The sensor takes over from a schedule fade.
@@ -1054,8 +1076,7 @@ impl AppModel {
         for id in differ {
             self.apply_level(&id, level);
         }
-        self.save();
-        cx.notify();
+        true
     }
 
     /// The computer switched between battery and mains power.
@@ -1267,8 +1288,14 @@ impl AppModel {
             let edited = self
                 .schedule_applied
                 .is_some_and(|(index, _)| then.entries.get(index) != now.entries.get(index));
-            if stop {
+            // Nothing computable is in effect any more (e.g. a sun entry
+            // lost its location): a fade toward the old target must stop.
+            let none_active =
+                crate::schedule::active(&now.entries, &chrono::Local::now(), now.location())
+                    .is_none();
+            if stop || none_active {
                 self.freeze_fade();
+                self.schedule_applied = None;
             }
             if edited {
                 self.schedule_applied = Some((usize::MAX, 0));
@@ -1277,6 +1304,9 @@ impl AppModel {
         }
         if self.settings.triggers != before.triggers {
             self.triggers_changed(before, cx);
+        }
+        if self.settings.adaptive != before.adaptive {
+            self.apply_adaptive();
         }
         if before.idle_dim.enabled && !self.settings.idle_dim.enabled {
             self.wake_displays();

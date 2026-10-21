@@ -588,6 +588,9 @@ impl SettingsWindow {
 
             // DDC/CI displays may answer brightness on a nonstandard code.
             let vcp_row = (matches!(row.monitor.backend, BrightnessBackend::Ddc { .. })
+                || (row.monitor.kind == MonitorKind::External
+                    && (!row.monitor.vcp_codes.is_empty()
+                        || row.monitor.backend == BrightnessBackend::Unsupported))
                 || row.settings.brightness_vcp.is_some())
             .then(|| {
                 let mut codes: Vec<u8> = BRIGHTNESS_VCPS
@@ -597,6 +600,13 @@ impl SettingsWindow {
                         row.monitor.vcp_codes.is_empty() || row.monitor.vcp_codes.contains(code)
                     })
                     .collect();
+                // Then every other code the display lists: some answer
+                // brightness only on a vendor code such as 0xE1.
+                for code in row.monitor.vcp_codes.iter().copied() {
+                    if !codes.contains(&code) {
+                        codes.push(code);
+                    }
+                }
                 if let Some(code) = row.settings.brightness_vcp
                     && !codes.contains(&code)
                 {

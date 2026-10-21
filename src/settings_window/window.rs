@@ -219,6 +219,9 @@ impl SettingsWindow {
         if tab == self.tab {
             return;
         }
+        if tab == Tab::Automation {
+            crate::light_sensor::refresh_availability();
+        }
         self.stop_hotkey_recording();
         let from = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
         let to = Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0);

@@ -41,6 +41,13 @@ pub fn available_cached() -> Option<bool> {
     }
 }
 
+/// Probe again in the background (a sensor may have appeared or its driver
+/// recovered) and repaint the windows when the answer changes. Never blocks.
+pub fn refresh_availability() {
+    #[cfg(windows)]
+    platform::refresh_availability();
+}
+
 /// A light subscription. Create/drop on the same non-UI thread (normally tray).
 /// Drop suppresses in-flight callbacks, revokes the event and releases WinRT.
 pub struct Watcher {
@@ -179,6 +186,31 @@ mod platform {
             });
         }
         AVAILABLE.load(Ordering::Acquire) == 2
+    }
+
+    pub(super) fn refresh_availability() {
+        use std::sync::atomic::AtomicBool;
+        static RUNNING: AtomicBool = AtomicBool::new(false);
+        if RUNNING.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let spawned = std::thread::Builder::new()
+            .name("light-reprobe".into())
+            .spawn(|| {
+                let present = Apartment::new()
+                    .and_then(|_apartment| default_sensor().map(|sensor| sensor.is_some()))
+                    .unwrap_or(false);
+                let state = if present { 2 } else { 1 };
+                if AVAILABLE.swap(state, Ordering::AcqRel) != state {
+                    crate::popup::send_command(crate::popup::PopupCommand::Run(Box::new(|cx| {
+                        cx.refresh_windows()
+                    })));
+                }
+                RUNNING.store(false, Ordering::Release);
+            });
+        if spawned.is_err() {
+            RUNNING.store(false, Ordering::Release);
+        }
     }
 
     fn default_sensor() -> Result<Option<LightSensor>> {
