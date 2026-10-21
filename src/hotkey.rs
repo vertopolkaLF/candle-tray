@@ -6,6 +6,7 @@
 //! the tray loop consumes it with [`take_pressed`]. The hotkey and recorder
 //! logic is Codex Minibar's, extended from one shortcut to one per action.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -162,16 +163,48 @@ pub enum Status {
 static DESIRED: Mutex<Vec<(Action, Option<Hotkey>)>> = Mutex::new(Vec::new());
 static DIRTY: AtomicBool = AtomicBool::new(false);
 static STATUS: Mutex<Vec<(Action, Status)>> = Mutex::new(Vec::new());
-/// Action of each registered hotkey id, by `id - HOTKEY_ID_BASE`.
-static REGISTERED: Mutex<Vec<Action>> = Mutex::new(Vec::new());
+/// Current id-to-action mapping and the cursor retained across registrations.
+static REGISTERED: Mutex<HotkeyIds> = Mutex::new(HotkeyIds::new());
 /// Actions whose shortcut was pressed, oldest first.
 static PRESSED: Mutex<Vec<Action>> = Mutex::new(Vec::new());
 /// Set while Settings records a shortcut, so pressing an existing one
 /// records it instead of running its action.
 static SUSPENDED: AtomicBool = AtomicBool::new(false);
 
-/// Hotkey ids are this base plus the position in [`DESIRED`].
-const HOTKEY_ID_BASE: i32 = 0x4354; // "CT"
+/// Application-owned ids, excluding the shared-DLL range (0xC000..=0xFFFF).
+const HOTKEY_ID_MAX: i32 = 0xBFFF;
+
+struct HotkeyIds {
+    next: i32,
+    actions: BTreeMap<i32, Action>,
+}
+
+impl HotkeyIds {
+    const fn new() -> Self {
+        Self {
+            next: 0x4354,
+            actions: BTreeMap::new(),
+        }
+    }
+
+    /// Keep advancing across generations so queued messages for retired ids
+    /// cannot select a newly registered action. Wrap only after the app range.
+    fn allocate(&mut self) -> Option<i32> {
+        for _ in 0..=HOTKEY_ID_MAX {
+            let id = self.next;
+            self.next = if id == HOTKEY_ID_MAX { 0 } else { id + 1 };
+            if !self.actions.contains_key(&id) {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    #[cfg(any(windows, test))]
+    fn action(&self, id: i32) -> Option<Action> {
+        self.actions.get(&id).copied()
+    }
+}
 
 /// Publish every shortcut the settings define.
 pub fn set_desired(hotkeys: Vec<(Action, Option<Hotkey>)>) {
@@ -208,16 +241,12 @@ pub fn observe_message(message: &windows_sys::Win32::UI::WindowsAndMessaging::MS
     if message.message != WM_HOTKEY {
         return;
     }
-    let action = (message.wParam as i32)
-        .checked_sub(HOTKEY_ID_BASE)
-        .and_then(|index| usize::try_from(index).ok())
-        .and_then(|index| {
-            REGISTERED
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(index)
-                .copied()
-        });
+    let action = i32::try_from(message.wParam).ok().and_then(|id| {
+        REGISTERED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .action(id)
+    });
     if let Some(action) = action {
         PRESSED
             .lock()
@@ -250,17 +279,19 @@ impl Registration {
         let desired = DESIRED.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let suspended = SUSPENDED.load(Ordering::SeqCst);
         let mut statuses = Vec::with_capacity(desired.len());
-        let mut actions = Vec::with_capacity(desired.len());
-        for (index, (action, hotkey)) in desired.iter().enumerate() {
-            actions.push(*action);
+        let mut ids = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
+        for (action, hotkey) in &desired {
             let status = match hotkey.filter(Hotkey::is_valid) {
                 None => Status::Off,
                 // Recording keeps the last known status on display.
                 Some(_) if suspended => status(*action),
                 Some(hotkey) => {
-                    let id = HOTKEY_ID_BASE + index as i32;
-                    if register(id, hotkey, action.repeats()) {
+                    if let Some(id) = ids
+                        .allocate()
+                        .filter(|&id| register(id, hotkey, action.repeats()))
+                    {
                         self.registered.push(id);
+                        ids.actions.insert(id, *action);
                         Status::Active
                     } else {
                         crate::logger::info(format!(
@@ -273,7 +304,6 @@ impl Registration {
             };
             statuses.push((*action, status));
         }
-        *REGISTERED.lock().unwrap_or_else(|e| e.into_inner()) = actions;
         let mut current = STATUS.lock().unwrap_or_else(|e| e.into_inner());
         let changed = *current != statuses;
         *current = statuses;
@@ -281,7 +311,9 @@ impl Registration {
     }
 
     fn unregister(&mut self) {
+        let mut ids = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
         for id in self.registered.drain(..) {
+            ids.actions.remove(&id);
             unregister(id);
         }
         PRESSED.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -343,6 +375,36 @@ mod tests {
             win,
             key,
         }
+    }
+
+    #[test]
+    fn retired_ids_do_not_select_actions_in_a_new_generation() {
+        let mut ids = HotkeyIds::new();
+        let old = ids.allocate().unwrap();
+        ids.actions.insert(old, Action::Profile(0));
+        assert_eq!(ids.action(old), Some(Action::Profile(0)));
+        ids.actions.remove(&old);
+        let new = ids.allocate().unwrap();
+        ids.actions.insert(new, Action::TurnOff);
+        assert_ne!(old, new);
+        assert_eq!(ids.action(old), None);
+        assert_eq!(ids.action(new), Some(Action::TurnOff));
+        assert_eq!(ids.action(-1), None);
+        assert_eq!(ids.action(HOTKEY_ID_MAX + 1), None);
+    }
+
+    #[test]
+    fn id_allocation_wraps_and_skips_active_registrations() {
+        let mut ids = HotkeyIds::new();
+        ids.next = HOTKEY_ID_MAX;
+        ids.actions.insert(HOTKEY_ID_MAX, Action::BrightnessUp);
+        ids.actions.insert(0, Action::BrightnessDown);
+        assert_eq!(ids.allocate(), Some(1));
+        assert_eq!(ids.action(HOTKEY_ID_MAX), Some(Action::BrightnessUp));
+        ids.actions = (0..=HOTKEY_ID_MAX)
+            .map(|id| (id, Action::TurnOff))
+            .collect();
+        assert_eq!(ids.allocate(), None);
     }
 
     #[test]

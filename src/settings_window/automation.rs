@@ -300,15 +300,20 @@ impl SettingsWindow {
         page
     }
 
-    /// Ask Windows where the computer is, off the UI thread.
+    /// Start consent on the UI thread and poll the background location lookup.
     fn detect_location(&mut self, cx: &mut Context<Self>) {
         self.locating = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async { crate::location::detect() })
-                .await;
+            let mut detection = crate::location::start();
+            let result = loop {
+                if let Some(result) = detection.poll() {
+                    break result;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(200))
+                    .await;
+            };
             let _ = this.update(cx, |this, cx| {
                 this.locating = false;
                 match result {
