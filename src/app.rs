@@ -60,8 +60,6 @@ struct FadeStep {
     current: u8,
 }
 
-/// Percent per wheel notch over the tray icon, as over a popup slider.
-const TRAY_SCROLL_STEP: i32 = 2;
 /// Pause before turning displays off from a shortcut or the tray menu.
 const TURN_OFF_DELAY: Duration = Duration::from_millis(500);
 
@@ -374,7 +372,9 @@ impl AppModel {
     /// The wheel turned over the tray icon.
     pub fn scroll_all(&mut self, notches: i32, cx: &mut Context<Self>) {
         if self.settings.tray_scroll {
-            self.step_all(notches * TRAY_SCROLL_STEP, cx);
+            // A notch moves as far as it does over a popup slider.
+            let step = i32::from(self.settings.slider_step());
+            self.step_all(notches * step, cx);
         }
     }
 
