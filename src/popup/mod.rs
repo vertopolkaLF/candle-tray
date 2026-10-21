@@ -49,6 +49,10 @@ pub enum PopupCommand {
     PowerSource {
         on_battery: bool,
     },
+    /// Smoothed ambient illuminance, in lux, from the light sensor service.
+    AmbientLight {
+        lux: f32,
+    },
     /// Run on the GPUI thread with the app context (tray menu actions etc.).
     Run(Box<dyn FnOnce(&mut gpui::App) + Send>),
 }

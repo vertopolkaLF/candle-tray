@@ -131,12 +131,27 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
         })
         .ok();
     let mut wheel = WheelHook::default();
+    let mut light_sensor = None;
+    let mut next_sensor_attempt = Instant::now();
     loop {
         // The theme and power-source checks share this timer; other inputs
         // arrive as window messages or a `wake`.
         let active = popup::is_visible();
         popup::wait_for_messages(Duration::from_millis(if active { 16 } else { 1000 }));
         popup::pump_messages();
+        if !crate::light_sensor::is_enabled() {
+            light_sensor = None;
+            next_sensor_attempt = Instant::now();
+        } else if light_sensor.is_none() && Instant::now() >= next_sensor_attempt {
+            // Missing sensors and transient driver failures must not spin.
+            next_sensor_attempt = Instant::now() + Duration::from_secs(30);
+            match crate::light_sensor::Watcher::start() {
+                Ok(watcher) => light_sensor = watcher,
+                Err(error) => {
+                    crate::logger::error(format!("could not watch ambient light: {error:#}"));
+                }
+            }
+        }
         if let Some(watchers) = &mut watchers {
             watchers.poll();
         }
@@ -190,6 +205,7 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
             popup::send_command(PopupCommand::Shortcut(action));
         }
         if EXIT_REQUESTED.load(Ordering::SeqCst) {
+            drop(light_sensor);
             drop(wheel);
             drop(hotkeys);
             drop(watchers);
