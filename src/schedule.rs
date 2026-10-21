@@ -83,7 +83,9 @@ pub fn occurrence<Tz: TimeZone>(
 }
 
 /// The entry in effect at `now`: the one that fired last, looking back over
-/// the previous two days. Returns its index and when it fired.
+/// the previous two days. Tomorrow's sun times count too, since a large
+/// negative offset can move them before midnight. Returns its index and when
+/// it fired.
 pub fn active<Tz: TimeZone>(
     entries: &[ScheduleEntry],
     now: &DateTime<Tz>,
@@ -92,8 +94,13 @@ pub fn active<Tz: TimeZone>(
     let zone = now.timezone();
     let today = now.date_naive();
     let mut best: Option<(usize, DateTime<Tz>)> = None;
-    for back in 0..=2 {
-        let Some(date) = today.checked_sub_days(Days::new(back)) else {
+    for shift in -1i64..=2 {
+        let date = if shift < 0 {
+            today.checked_add_days(Days::new(1))
+        } else {
+            today.checked_sub_days(Days::new(shift as u64))
+        };
+        let Some(date) = date else {
             continue;
         };
         for (index, entry) in entries.iter().enumerate() {
@@ -177,6 +184,18 @@ mod tests {
         let entries = [entry(ScheduleTime::Sunset { offset: 0 })];
         let now = zone.with_ymd_and_hms(2024, 3, 20, 20, 0, 0).unwrap();
         assert!(active(&entries, &now, None).is_none());
+        let (_, fired) = active(&entries, &now, Some((55.75, 37.62))).unwrap();
+        assert_eq!(fired.date_naive(), now.date_naive());
+        assert_eq!(fired.hour(), 18);
+    }
+
+    #[test]
+    fn early_sun_offsets_fire_the_evening_before() {
+        // Sunrise on 2024-03-21 in Moscow is about 06:30; 12 hours earlier
+        // is the evening of the 20th.
+        let zone = FixedOffset::east_opt(3 * 3600).unwrap();
+        let entries = [entry(ScheduleTime::Sunrise { offset: -720 })];
+        let now = zone.with_ymd_and_hms(2024, 3, 20, 20, 0, 0).unwrap();
         let (_, fired) = active(&entries, &now, Some((55.75, 37.62))).unwrap();
         assert_eq!(fired.date_naive(), now.date_naive());
         assert_eq!(fired.hour(), 18);

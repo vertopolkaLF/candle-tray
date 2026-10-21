@@ -46,6 +46,8 @@ pub struct AppModel {
     /// when its app leaves the foreground. Dropped when the user changes
     /// levels in the meantime.
     app_trigger: Option<(usize, BTreeMap<String, ProfileLevels>)>,
+    /// The app last reported in the foreground.
+    foreground: Option<String>,
     /// Last reported power source (on battery); the first report only sets it.
     on_battery: Option<bool>,
     service: Arc<MonitorService>,
@@ -109,6 +111,7 @@ impl AppModel {
             fade: None,
             app_trigger: None,
             on_battery: None,
+            foreground: None,
             service,
             persist,
         }
@@ -123,6 +126,7 @@ impl AppModel {
                 for old in &previous {
                     self.carry_level(old);
                 }
+                let first = !self.loaded;
                 self.loaded = true;
                 if let Some(pending) = self.import_pending.take() {
                     let before = self.settings.clone();
@@ -138,9 +142,18 @@ impl AppModel {
                     }
                 }
                 // Restoring brightened dimmed displays; dim them again on the
-                // next tick if the user is still away.
-                if self.idle_dimmed.is_some() && reason != SnapshotReason::Requested {
+                // next tick if the user is still away. Without restoring they
+                // stay dimmed and must come back on input.
+                if self.settings.restore_levels
+                    && self.idle_dimmed.is_some()
+                    && reason != SnapshotReason::Requested
+                {
                     self.idle_dimmed = None;
+                }
+                // An app trigger seen before the displays were known applies
+                // now, before the schedule (which waits while it holds).
+                if first && let Some(exe) = self.foreground.clone() {
+                    self.on_foreground(&exe, cx);
                 }
                 // The schedule applies at startup and catches up after sleep.
                 if self.run_schedule(false) {
@@ -853,7 +866,7 @@ impl AppModel {
         let before = self.settings.clone();
         change(&mut self.settings);
         self.apply_runtime_effects(&before);
-        self.automation_changed(&before);
+        self.automation_changed(&before, cx);
         self.save();
         cx.notify();
     }
@@ -862,7 +875,7 @@ impl AppModel {
     pub fn replace_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
         let before = std::mem::replace(&mut self.settings, settings);
         self.apply_runtime_effects(&before);
-        self.automation_changed(&before);
+        self.automation_changed(&before, cx);
         self.save();
         cx.notify();
     }
@@ -944,6 +957,11 @@ impl AppModel {
 
     /// Another app came to the foreground (`exe` like `game.exe`).
     pub fn on_foreground(&mut self, exe: &str, cx: &mut Context<Self>) {
+        self.foreground = Some(exe.to_owned());
+        // Applied with the first snapshot, once the displays are known.
+        if !self.loaded {
+            return;
+        }
         let matched = self
             .settings
             .triggers
@@ -972,6 +990,32 @@ impl AppModel {
                     cx.notify();
                 }
             }
+        }
+    }
+
+    /// Triggers were edited: keep, move or end the app trigger in effect.
+    fn triggers_changed(&mut self, before: &Settings, cx: &mut Context<Self>) {
+        let exe = self.foreground.clone().unwrap_or_default();
+        let Some((index, levels)) = self.app_trigger.take() else {
+            // A new trigger for the app in front applies right away.
+            self.on_foreground(&exe, cx);
+            return;
+        };
+        let old_profile = before.triggers.get(index).map(|trigger| trigger.profile);
+        match self
+            .settings
+            .triggers
+            .iter()
+            .position(|trigger| trigger.matches_app(&exe))
+        {
+            Some(matched) => {
+                let profile = self.settings.triggers[matched].profile;
+                if Some(profile) != old_profile {
+                    self.apply_profile(profile, cx);
+                }
+                self.app_trigger = Some((matched, levels));
+            }
+            None => self.restore_levels(&levels),
         }
     }
 
@@ -1175,13 +1219,25 @@ impl AppModel {
     }
 
     /// Settings edits that start or stop automation take effect now.
-    fn automation_changed(&mut self, before: &Settings) {
+    fn automation_changed(&mut self, before: &Settings, cx: &mut Context<Self>) {
         let (now, then) = (&self.settings.schedule, &before.schedule);
         if now != then {
-            if !now.enabled {
+            let stop = !now.enabled || now.entries.is_empty();
+            // The entry in effect was edited or removed: apply what is in
+            // effect now, even if it fired at the same moment.
+            let edited = self
+                .schedule_applied
+                .is_some_and(|(index, _)| then.entries.get(index) != now.entries.get(index));
+            if stop {
                 self.freeze_fade();
             }
+            if edited {
+                self.schedule_applied = Some((usize::MAX, 0));
+            }
             self.run_schedule(true);
+        }
+        if self.settings.triggers != before.triggers {
+            self.triggers_changed(before, cx);
         }
         if before.idle_dim.enabled && !self.settings.idle_dim.enabled {
             self.wake_displays();
