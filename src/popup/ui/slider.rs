@@ -21,8 +21,6 @@ use super::{fx, theme::Palette};
 /// Height of the pointer target; the rail is centered in it.
 pub(crate) const SLIDER_HEIGHT: f32 = 32.0;
 const THUMB: f32 = 20.0;
-/// Percent per wheel notch.
-const WHEEL_STEP: i32 = 2;
 
 pub(crate) type Handler = Rc<dyn Fn(u8, &mut Window, &mut App)>;
 pub(crate) type HoverHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
@@ -33,6 +31,7 @@ pub(crate) type DragState = Rc<RefCell<Option<SharedString>>>;
 pub(crate) struct SliderSpec<'a> {
     pub(crate) id: SharedString,
     pub(crate) value: u8,
+    pub(crate) step: u8,
     pub(crate) enabled: bool,
     pub(crate) palette: &'a Palette,
     pub(crate) drag: DragState,
@@ -45,6 +44,7 @@ pub(crate) fn slider(spec: SliderSpec<'_>, fx: &mut fx::Fx) -> AnyElement {
     let SliderSpec {
         id,
         value,
+        step,
         enabled,
         palette,
         drag,
@@ -79,12 +79,12 @@ pub(crate) fn slider(spec: SliderSpec<'_>, fx: &mut fx::Fx) -> AnyElement {
         palette.text_tertiary
     };
     let bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
-    let locate = |x: Pixels, bounds: Bounds<Pixels>| {
+    let locate = move |x: Pixels, bounds: Bounds<Pixels>| {
         // The thumb's center travels inside the rail inset by its radius.
         let inset = THUMB / 2.0;
         let width = (f32::from(bounds.size.width) - THUMB).max(1.0);
         let t = ((f32::from(x - bounds.left()) - inset) / width).clamp(0.0, 1.0);
-        (t * 100.0).round() as u8
+        ((t * 100.0 / f32::from(step)).round() * f32::from(step)).clamp(0.0, 100.0) as u8
     };
 
     let track_bounds = Rc::clone(&bounds);
@@ -211,7 +211,7 @@ pub(crate) fn slider(spec: SliderSpec<'_>, fx: &mut fx::Fx) -> AnyElement {
             } else {
                 notches
             };
-            let next = (i32::from(value) + notches * WHEEL_STEP).clamp(0, 100) as u8;
+            let next = (i32::from(value) + notches * i32::from(step)).clamp(0, 100) as u8;
             if next != value {
                 wheel_change(next, window, cx);
             }

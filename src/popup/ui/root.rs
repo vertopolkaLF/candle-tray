@@ -50,15 +50,16 @@ const GLYPH: f32 = 18.0;
 /// Baseline height before the first content measurement.
 const INITIAL_HEIGHT: f32 = 160.0;
 const SCROLL_GLIDE: Duration = Duration::from_millis(140);
-/// Profile glyph picker: two rows of tiles, a divider and the delete row.
+/// Profile glyph picker: two rows of tiles, a divider, then the save and
+/// delete rows.
 const PROFILE_MENU_COLUMNS: usize = 6;
 const PROFILE_MENU_PADDING: f32 = 4.0;
 const PROFILE_MENU_GAP: f32 = 4.0;
 const PROFILE_MENU_INSET: f32 = 6.0;
-/// Padding, border, two tile rows with their gap, the divider and the
-/// delete row with the gaps around the divider.
+/// Padding, border, two tile rows with their gap, the divider, the two
+/// action rows with their gap and the gaps around the divider.
 const PROFILE_MENU_HEIGHT: f32 =
-    PROFILE_MENU_PADDING * 2.0 + 2.0 + BUTTON * 3.0 + 2.0 + 1.0 + PROFILE_MENU_GAP * 2.0;
+    PROFILE_MENU_PADDING * 2.0 + 2.0 + BUTTON * 4.0 + 2.0 * 2.0 + 1.0 + PROFILE_MENU_GAP * 2.0;
 
 /// Round the independent MaxContent measurement once to physical pixels.
 fn measured_page_height(height: f32, scale: f32) -> f32 {
@@ -1215,6 +1216,7 @@ impl PopupRoot {
         let spec = SliderSpec {
             id: id.into(),
             value,
+            step: self.model.read(cx).settings.slider_step(),
             enabled,
             palette: &self.palette,
             drag: Rc::clone(&self.drag),
@@ -1635,47 +1637,20 @@ impl PopupRoot {
                 .into_any_element(),
             );
         }
-        let delete = {
-            let model = self.model.clone();
-            let this = cx.entity();
-            let hover_id = fx::key("profile-delete");
-            let hover = self.fx.toggle(
-                fx::key("profile-delete-hover"),
-                self.hovered(hover_id),
-                fx::FASTER,
-            );
-            let mut row = div()
-                .id("profile-delete")
-                .relative()
-                .h(px(BUTTON))
-                .px(px(9.0))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .rounded(px(6.0))
-                .on_hover(self.hover_listener(hover_id, cx))
-                .on_click(move |_, _, cx| {
-                    model.update(cx, |model, cx| model.delete_profile(index, cx));
-                    this.update(cx, |root, cx| {
-                        root.profile_menu = None;
-                        cx.notify();
-                    });
-                });
-            if hover > 0.001 {
-                row = row.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .rounded(px(6.0))
-                        .bg(palette.subtle_fill.opacity(hover)),
-                );
-            }
-            row.child(icon("fluent-delete", GLYPH, palette.chrome_icon))
-                .child(SharedString::from(
-                    crate::i18n::tr("popup-profile-delete").to_owned(),
-                ))
-        };
+        let save = self.profile_menu_row(
+            "profile-save",
+            "fluent-save",
+            "popup-profile-save",
+            move |model, cx| model.recapture_profile(index, cx),
+            cx,
+        );
+        let delete = self.profile_menu_row(
+            "profile-delete",
+            "fluent-delete",
+            "popup-profile-delete",
+            move |model, cx| model.delete_profile(index, cx),
+            cx,
+        );
         let offset = self.chrome_height() + PROFILE_MENU_INSET - CHROME_INSET;
         let menu = div()
             .id("profile-menu")
@@ -1701,13 +1676,70 @@ impl PopupRoot {
                     .children(tiles),
             )
             .child(self.divider())
-            .child(delete);
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(save)
+                    .child(delete),
+            );
         let menu = if self.host.placement.top {
             menu.top(px(offset))
         } else {
             menu.bottom(px(offset))
         };
         [scrim, menu.into_any_element()]
+    }
+
+    /// Text action in the profile menu; closes the menu after `action`.
+    fn profile_menu_row(
+        &mut self,
+        id: &'static str,
+        glyph: &'static str,
+        label: &str,
+        action: impl Fn(&mut AppModel, &mut Context<AppModel>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let palette = self.palette.clone();
+        let model = self.model.clone();
+        let this = cx.entity();
+        let hover_id = fx::key(("profile-menu-row", id));
+        let hover = self.fx.toggle(
+            fx::key(("profile-menu-row-hover", id)),
+            self.hovered(hover_id),
+            fx::FASTER,
+        );
+        let mut row = div()
+            .id(id)
+            .relative()
+            .h(px(BUTTON))
+            .px(px(9.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.0))
+            .rounded(px(6.0))
+            .on_hover(self.hover_listener(hover_id, cx))
+            .on_click(move |_, _, cx| {
+                model.update(cx, |model, cx| action(model, cx));
+                this.update(cx, |root, cx| {
+                    root.profile_menu = None;
+                    cx.notify();
+                });
+            });
+        if hover > 0.001 {
+            row = row.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(6.0))
+                    .bg(palette.subtle_fill.opacity(hover)),
+            );
+        }
+        row.child(icon(glyph, GLYPH, palette.chrome_icon))
+            .child(SharedString::from(crate::i18n::tr(label).to_owned()))
+            .into_any_element()
     }
 
     /// Toggle in a display's card header (HDR, DDC/CI power), tinted with

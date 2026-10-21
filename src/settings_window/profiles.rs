@@ -11,12 +11,6 @@ use crate::hotkey::{Hotkey, Status};
 use crate::popup::ui::assets::profile_glyph;
 use crate::settings::{ProfileIcon, ProfileLevels};
 
-const PERCENT: SliderRange = SliderRange {
-    min: 0.0,
-    max: 100.0,
-    step: 1.0,
-};
-
 fn tr(key: &str) -> SharedString {
     crate::i18n::tr(key).into()
 }
@@ -54,6 +48,11 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let model = self.model.read(cx);
+        let percent = SliderRange {
+            min: 0.0,
+            max: 100.0,
+            step: f32::from(model.settings.slider_step()),
+        };
         let profiles = model.settings.profiles.clone();
         let can_save = model.can_save_profile();
         let count = profiles.len();
@@ -132,7 +131,7 @@ impl SettingsWindow {
                         k,
                         format!("profile-{index}-{id}-{label}"),
                         f32::from(value),
-                        PERCENT,
+                        percent,
                         200.0,
                         Self::h(cx, move |this, value: f32, _, cx| {
                             let value = value.round().clamp(0.0, 100.0) as u8;

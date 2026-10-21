@@ -64,6 +64,7 @@ fn source(name: &str) -> Option<&'static str> {
         }
         "fluent-add" => include_str!("../../../assets/icons/fluent-add-20-filled.svg"),
         "fluent-delete" => include_str!("../../../assets/icons/fluent-delete-20-regular.svg"),
+        "fluent-save" => include_str!("../../../assets/icons/fluent-save-20-regular.svg"),
         "profile-sun" => include_str!("../../../assets/icons/fluent-weather-sunny-20-regular.svg"),
         "profile-moon" => include_str!("../../../assets/icons/fluent-weather-moon-20-regular.svg"),
         "profile-lightbulb" => {

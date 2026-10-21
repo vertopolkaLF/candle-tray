@@ -18,6 +18,7 @@ use std::{
 use crate::monitors::{MonitorId, TurnOffMode};
 
 pub const CURRENT_VERSION: u32 = 1;
+pub const SLIDER_STEPS: [u8; 4] = [1, 2, 5, 10];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -210,6 +211,8 @@ pub struct Settings {
     pub turn_off: TurnOffSetting,
     /// Minimum interval between hardware writes while dragging.
     pub update_interval_ms: u32,
+    /// Percent increment for level sliders and mouse-wheel adjustments.
+    pub slider_step: u8,
     /// Monitor ids in display order; unknown monitors go last by `num`.
     pub order: Vec<MonitorId>,
     pub monitors: BTreeMap<MonitorId, MonitorSettings>,
@@ -234,6 +237,7 @@ impl Default for Settings {
             link_levels: false,
             turn_off: TurnOffSetting::Windows,
             update_interval_ms: 100,
+            slider_step: 1,
             order: Vec::new(),
             monitors: BTreeMap::new(),
             twinkle_import_done: false,
@@ -243,6 +247,15 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Ignore unsupported hand-edited values without losing other settings.
+    pub fn slider_step(&self) -> u8 {
+        if SLIDER_STEPS.contains(&self.slider_step) {
+            self.slider_step
+        } else {
+            1
+        }
+    }
+
     /// `%APPDATA%\Candle Tray\settings.toml`.
     pub fn default_path() -> Result<PathBuf> {
         let dirs = directories::ProjectDirs::from("", "", "Candle Tray")
@@ -487,8 +500,27 @@ mod tests {
     fn missing_fields_use_defaults() {
         let settings: Settings = toml::from_str("[monitors.a]\nname = 'Desk'").unwrap();
         assert_eq!(settings.update_interval_ms, 100);
+        assert_eq!(settings.slider_step(), 1);
         assert_eq!(settings.monitors["a"].max, 100);
         assert!(settings.restore_levels);
+    }
+    #[test]
+    fn slider_steps_round_trip_and_invalid_values_fall_back() {
+        for step in SLIDER_STEPS {
+            let settings = Settings {
+                slider_step: step,
+                ..Default::default()
+            };
+            let raw = toml::to_string(&settings).unwrap();
+            assert_eq!(
+                toml::from_str::<Settings>(&raw).unwrap().slider_step(),
+                step
+            );
+        }
+        for step in [0, 3, 255] {
+            let settings: Settings = toml::from_str(&format!("slider_step = {step}")).unwrap();
+            assert_eq!(settings.slider_step(), 1);
+        }
     }
     #[test]
     fn profiles_round_trip() {

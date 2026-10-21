@@ -7,7 +7,7 @@ use gpui::{
 use super::kit::{self, Button, Kit, Row, SliderRange};
 use super::window::SettingsWindow;
 use crate::monitors::{BrightnessBackend, MonitorKind};
-use crate::settings::{BackdropBrightness, Language, PopupMaterial, Theme, TrayIcon};
+use crate::settings::{BackdropBrightness, Language, PopupMaterial, SLIDER_STEPS, Theme, TrayIcon};
 
 /// Update intervals offered while dragging, in milliseconds.
 const UPDATE_INTERVALS: [u32; 5] = [50, 100, 250, 500, 1000];
@@ -214,6 +214,25 @@ impl SettingsWindow {
                     Self::h(cx, |this, index: usize, _, cx| {
                         let ms = UPDATE_INTERVALS[index.min(UPDATE_INTERVALS.len() - 1)];
                         this.edit(cx, move |settings| settings.update_interval_ms = ms);
+                    }),
+                ),
+                kit::dropdown_row(
+                    k,
+                    "general-slider-step",
+                    tr("settings-slider-step"),
+                    Some(&crate::i18n::tr("settings-slider-step-description")),
+                    SLIDER_STEPS
+                        .iter()
+                        .map(|step| step.to_string().into())
+                        .collect(),
+                    SLIDER_STEPS
+                        .iter()
+                        .position(|step| *step == s.slider_step())
+                        .unwrap_or(0) as i32,
+                    false,
+                    Self::h(cx, |this, index: usize, _, cx| {
+                        let step = SLIDER_STEPS[index.min(SLIDER_STEPS.len() - 1)];
+                        this.edit(cx, move |settings| settings.slider_step = step);
                     }),
                 ),
             ]
