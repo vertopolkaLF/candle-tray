@@ -1,10 +1,15 @@
 //! The About page: version, updates and project links.
 
-use gpui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, div, px};
+use gpui::{
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, div, px, relative,
+};
 
-use super::kit::{self, Button, Kit, Row};
+use super::kit::{self, Button, Kit, Row, eid};
 use super::window::SettingsWindow;
 use crate::updater::{self, ISSUES_URL, RELEASES_URL, REPO_URL, UpdatePhase};
+
+const AUTHOR_URL: &str = "https://github.com/vertopolkaLF";
 
 fn tr(key: &str) -> String {
     crate::i18n::tr(key)
@@ -151,32 +156,89 @@ impl SettingsWindow {
             ]
         });
 
-        let link = |k: &mut Kit, id: &'static str, label: String, url: &'static str| {
-            Button::new(id, label)
-                .on_click(kit::handler(move |(), _, _| updater::open_url(url)))
-                .render(k)
+        let tile = |id: &'static str,
+                    title: String,
+                    detail: String,
+                    glyph: &'static str,
+                    url: &'static str| {
+            let (tile, t) = kit::hoverable(k, div().id(eid(id)), kit::hover_key(id));
+            tile.w(relative(0.5))
+                .p(px(6.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(14.0))
+                        .p(px(16.0))
+                        .rounded(px(kit::CARD_RADIUS))
+                        .bg(kit::blend(theme.card, theme.card_hover, t))
+                        .shadow(kit::card_shadow(&theme))
+                        .child(
+                            div()
+                                .size(px(36.0))
+                                .rounded(px(8.0))
+                                .bg(theme.accent_soft)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(kit::icon(glyph, 18.0, theme.accent_text)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .gap(px(1.0))
+                                .child(
+                                    div()
+                                        .text_size(px(14.0))
+                                        .line_height(px(20.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(title),
+                                )
+                                .child(
+                                    kit::text(detail, 12.0, theme.text_secondary)
+                                        .line_height(px(16.0)),
+                                ),
+                        )
+                        .child(kit::icon("arrow-square-out", 14.0, theme.text_tertiary)),
+                )
+                .on_click(move |_, _, _| updater::open_url(url))
+                .into_any_element()
         };
-        let links = div()
+        let resources = div()
             .flex()
             .flex_wrap()
-            .gap(px(8.0))
-            .child(link(k, "about-github", tr("about-github"), REPO_URL))
-            .child(link(
-                k,
+            .mx(px(-6.0))
+            .child(tile(
+                "about-github",
+                tr("about-github"),
+                tr("about-github-detail"),
+                "github-logo-fill",
+                REPO_URL,
+            ))
+            .child(tile(
                 "about-releases",
                 tr("about-releases"),
+                tr("about-releases-detail"),
+                "download-simple-fill",
                 RELEASES_URL,
             ))
-            .child(link(k, "about-issues", tr("about-issues"), ISSUES_URL))
+            .child(tile(
+                "about-issues",
+                tr("about-issues"),
+                tr("about-issues-detail"),
+                "flag-fill",
+                ISSUES_URL,
+            ))
+            .child(tile(
+                "about-author",
+                tr("about-author"),
+                "@vertopolkaLF".to_owned(),
+                "at-fill",
+                AUTHOR_URL,
+            ))
             .into_any_element();
-        let resources = kit::card_of(k, |k| {
-            vec![
-                Row::new("about-links", tr("about-links"))
-                    .description(k, tr("about-links-description"))
-                    .trailing(links)
-                    .render(k),
-            ]
-        });
 
         vec![
             hero,

@@ -88,6 +88,13 @@ fn source(name: &str) -> Option<&'static str> {
         "check-circle-fill" => include_str!("../../../assets/icons/ph-check-circle-fill.svg"),
         "dots-three-bold" => include_str!("../../../assets/icons/ph-dots-three-bold.svg"),
         "info-fill" => include_str!("../../../assets/icons/ph-info-fill.svg"),
+        "github-logo-fill" => include_str!("../../../assets/icons/ph-github-logo-fill.svg"),
+        "download-simple-fill" => {
+            include_str!("../../../assets/icons/ph-download-simple-fill.svg")
+        }
+        "flag-fill" => include_str!("../../../assets/icons/ph-flag-fill.svg"),
+        "at-fill" => include_str!("../../../assets/icons/ph-at-fill.svg"),
+        "arrow-square-out" => include_str!("../../../assets/icons/ph-arrow-square-out.svg"),
         "sliders-horizontal-fill" => {
             include_str!("../../../assets/icons/ph-sliders-horizontal-fill.svg")
         }

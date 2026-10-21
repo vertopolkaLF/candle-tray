@@ -394,7 +394,11 @@ impl SettingsWindow {
 
     fn content(&mut self, k: &mut Kit, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.step_scroll_glide(k);
-        let mut rows = vec![kit::page_title(k, self.tab.label())];
+        // The About hero names the app itself.
+        let mut rows = match self.tab {
+            Tab::About => Vec::new(),
+            _ => vec![kit::page_title(k, self.tab.label())],
+        };
         rows.extend(match self.tab {
             Tab::General => self.general_page(k, window, cx),
             Tab::Monitors => self.monitors_page(k, window, cx),
