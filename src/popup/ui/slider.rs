@@ -12,8 +12,8 @@ use std::{
 
 use gpui::{
     AnyElement, App, Bounds, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement, Styled, Window, canvas, div, px, relative,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, ScrollDelta, ScrollWheelEvent,
+    SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, px, relative,
 };
 
 use super::{fx, theme::Palette};
@@ -201,21 +201,68 @@ pub(crate) fn slider(spec: SliderSpec<'_>, fx: &mut fx::Fx) -> AnyElement {
             },
         )
         .on_scroll_wheel(move |event: &ScrollWheelEvent, window, cx| {
-            let delta = f32::from(event.delta.pixel_delta(px(20.0)).y);
-            if delta.abs() < 0.5 {
+            cx.stop_propagation();
+            let notches = wheel_notches(event.delta);
+            if notches == 0 {
                 return;
             }
-            let notches = (delta / 20.0).round().clamp(-5.0, 5.0) as i32;
-            let notches = if notches == 0 {
-                delta.signum() as i32
-            } else {
-                notches
-            };
             let next = (i32::from(value) + notches * i32::from(step)).clamp(0, 100) as u8;
             if next != value {
                 wheel_change(next, window, cx);
             }
-            cx.stop_propagation();
         });
     element.into_any_element()
+}
+
+/// Touchpad travel that counts as one wheel notch.
+const PIXELS_PER_NOTCH: f32 = 40.0;
+
+thread_local! {
+    /// Fractions of a notch not yet applied: high-resolution wheels and
+    /// touchpads report a notch in several smaller events.
+    static WHEEL_REMAINDER: Cell<f32> = const { Cell::new(0.0) };
+}
+
+/// Whole notches in a wheel event, one slider step each. GPUI reports a
+/// mouse notch as the system's "lines per notch" (3 by default), so lines
+/// are scaled back to notches.
+fn wheel_notches(delta: ScrollDelta) -> i32 {
+    let notches = match delta {
+        ScrollDelta::Lines(lines) => lines.y / wheel_scroll_lines(),
+        ScrollDelta::Pixels(pixels) => f32::from(pixels.y) / PIXELS_PER_NOTCH,
+    };
+    WHEEL_REMAINDER.with(|remainder| {
+        let mut total = remainder.get() + notches;
+        // A reversed direction starts over instead of paying off the rest.
+        if total.signum() != notches.signum() {
+            total = notches;
+        }
+        let whole = total.trunc();
+        remainder.set(total - whole);
+        whole.clamp(-5.0, 5.0) as i32
+    })
+}
+
+#[cfg(windows)]
+fn wheel_scroll_lines() -> f32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SPI_GETWHEELSCROLLLINES, SystemParametersInfoW,
+    };
+    let mut lines = 3u32;
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWHEELSCROLLLINES,
+            0,
+            &mut lines as *mut u32 as *mut _,
+            0,
+        )
+    };
+    // GPUI multiplies by this same value, WHEEL_PAGESCROLL (u32::MAX)
+    // included, so dividing by it always yields notches.
+    if ok == 0 { 3.0 } else { lines.max(1) as f32 }
+}
+
+#[cfg(not(windows))]
+fn wheel_scroll_lines() -> f32 {
+    3.0
 }
