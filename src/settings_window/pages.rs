@@ -93,6 +93,7 @@ impl SettingsWindow {
             crate::i18n::tr("settings-backdrop-brightness-normal"),
             crate::i18n::tr("settings-backdrop-brightness-brighter"),
         ];
+        let step_labels: Vec<String> = SLIDER_STEPS.iter().map(u8::to_string).collect();
         let brightness_index = match s.backdrop_brightness {
             BackdropBrightness::Darker => 0,
             BackdropBrightness::Normal => 1,
@@ -138,29 +139,39 @@ impl SettingsWindow {
                         }),
                     ))
                     .render(k),
-                kit::dropdown_row(
-                    k,
-                    "general-material",
-                    tr("settings-material"),
-                    Some(&crate::i18n::tr("settings-material-description")),
-                    material_labels.iter().map(|l| l.clone().into()).collect(),
-                    material_index,
-                    false,
-                    Self::h(cx, |this, index: usize, _, cx| {
-                        let material = match index {
-                            1 => PopupMaterial::Mica,
-                            2 => PopupMaterial::Solid,
-                            _ => PopupMaterial::Acrylic,
-                        };
-                        this.edit(cx, move |settings| settings.popup_material = material);
-                    }),
-                ),
-                kit::dropdown_row(
+                Row::new("general-material-row", tr("settings-material"))
+                    .description(k, tr("settings-material-description"))
+                    .trailing(kit::segmented(
+                        k,
+                        "general-material",
+                        &material_labels
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
+                        material_index,
+                        false,
+                        Self::h(cx, |this, index: usize, _, cx| {
+                            let material = match index {
+                                1 => PopupMaterial::Mica,
+                                2 => PopupMaterial::Solid,
+                                _ => PopupMaterial::Acrylic,
+                            };
+                            this.edit(cx, move |settings| settings.popup_material = material);
+                        }),
+                    ))
+                    .render(k),
+                Row::new(
+                    "general-backdrop-brightness-row",
+                    tr("settings-backdrop-brightness"),
+                )
+                .description(k, tr("settings-backdrop-brightness-description"))
+                .trailing(kit::segmented(
                     k,
                     "general-backdrop-brightness",
-                    tr("settings-backdrop-brightness"),
-                    Some(&crate::i18n::tr("settings-backdrop-brightness-description")),
-                    brightness_labels.iter().map(|l| l.clone().into()).collect(),
+                    &brightness_labels
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
                     brightness_index,
                     s.popup_material == PopupMaterial::Solid,
                     Self::h(cx, |this, index: usize, _, cx| {
@@ -174,7 +185,8 @@ impl SettingsWindow {
                         });
                         crate::popup::send_command(crate::popup::PopupCommand::AppearanceChanged);
                     }),
-                ),
+                ))
+                .render(k),
                 Row::new("row-general-tray-icon", tr("settings-tray-icon"))
                     .trailing(kit::icon_choices(
                         k,
@@ -234,25 +246,23 @@ impl SettingsWindow {
                         this.edit(cx, move |settings| settings.update_interval_ms = ms);
                     }),
                 ),
-                kit::dropdown_row(
-                    k,
-                    "general-slider-step",
-                    tr("settings-slider-step"),
-                    Some(&crate::i18n::tr("settings-slider-step-description")),
-                    SLIDER_STEPS
-                        .iter()
-                        .map(|step| step.to_string().into())
-                        .collect(),
-                    SLIDER_STEPS
-                        .iter()
-                        .position(|step| *step == s.slider_step())
-                        .unwrap_or(0) as i32,
-                    false,
-                    Self::h(cx, |this, index: usize, _, cx| {
-                        let step = SLIDER_STEPS[index.min(SLIDER_STEPS.len() - 1)];
-                        this.edit(cx, move |settings| settings.slider_step = step);
-                    }),
-                ),
+                Row::new("general-slider-step-row", tr("settings-slider-step"))
+                    .description(k, tr("settings-slider-step-description"))
+                    .trailing(kit::segmented(
+                        k,
+                        "general-slider-step",
+                        &step_labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                        SLIDER_STEPS
+                            .iter()
+                            .position(|step| *step == s.slider_step())
+                            .unwrap_or(0),
+                        false,
+                        Self::h(cx, |this, index: usize, _, cx| {
+                            let step = SLIDER_STEPS[index.min(SLIDER_STEPS.len() - 1)];
+                            this.edit(cx, move |settings| settings.slider_step = step);
+                        }),
+                    ))
+                    .render(k),
             ]
         });
 
