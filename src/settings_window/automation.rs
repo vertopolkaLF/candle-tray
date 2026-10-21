@@ -25,23 +25,6 @@ fn tr(key: &str) -> SharedString {
     crate::i18n::tr(key).into()
 }
 
-/// `07:30` for minutes after midnight.
-fn clock_text(minutes: u16) -> String {
-    format!("{:02}:{:02}", minutes / 60, minutes % 60)
-}
-
-/// Parses `7:30`, `07:30` or `7` into minutes after midnight.
-pub(super) fn parse_clock(text: &str) -> Option<u16> {
-    let text = text.trim();
-    let (hours, minutes) = match text.split_once([':', '.']) {
-        Some((hours, minutes)) => (hours.trim(), minutes.trim()),
-        None => (text, "0"),
-    };
-    let hours: u16 = hours.parse().ok()?;
-    let minutes: u16 = minutes.parse().ok()?;
-    (hours < 24 && minutes < 60).then_some(hours * 60 + minutes)
-}
-
 /// `+30`, `-15` or `0` minutes.
 fn offset_text(offset: i16) -> String {
     if offset > 0 {
@@ -424,17 +407,18 @@ impl SettingsWindow {
                 TriggerCondition::OnBattery => 1,
                 TriggerCondition::OnAc => 2,
             };
-            let condition = kit::dropdown(
+            let labels = [
+                crate::i18n::tr("automation-trigger-app"),
+                crate::i18n::tr("automation-trigger-battery"),
+                crate::i18n::tr("automation-trigger-ac"),
+            ];
+            let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+            let condition = kit::segmented(
                 k,
                 format!("trigger-kind-{index}"),
-                vec![
-                    tr("automation-trigger-app"),
-                    tr("automation-trigger-battery"),
-                    tr("automation-trigger-ac"),
-                ],
-                Some(kind),
+                &labels,
+                kind,
                 false,
-                180.0,
                 Self::h(cx, move |this, choice: usize, _, cx| {
                     this.edit(cx, move |settings| {
                         if let Some(trigger) = settings.triggers.get_mut(index) {
@@ -464,7 +448,7 @@ impl SettingsWindow {
                             });
                         },
                     );
-                    Some(kit::text_field(k, &input, Some(140.0), window, cx))
+                    Some(kit::text_field(k, &input, Some(200.0), window, cx))
                 }
                 _ => None,
             };
@@ -484,7 +468,6 @@ impl SettingsWindow {
                 .items_center()
                 .gap(px(8.0))
                 .child(condition)
-                .children(exe_field)
                 .child(delete)
                 .into_any_element();
             let profile = kit::dropdown(
@@ -505,10 +488,8 @@ impl SettingsWindow {
                     });
                 }),
             );
-            let description = matches!(trigger.condition, TriggerCondition::App { .. })
-                .then(|| tr("automation-trigger-app-description"));
             section.push(kit::card_of(k, |k| {
-                vec![
+                let mut rows = vec![
                     Row::new(
                         format!("trigger-when-{index}"),
                         crate::i18n::format(
@@ -516,16 +497,29 @@ impl SettingsWindow {
                             &[("number", (index + 1).to_string())],
                         ),
                     )
-                    .description_opt(k, description)
                     .trailing(when)
                     .render(k),
+                ];
+                if let Some(exe_field) = exe_field {
+                    rows.push(
+                        Row::new(
+                            format!("trigger-exe-row-{index}"),
+                            tr("automation-trigger-exe"),
+                        )
+                        .description(k, tr("automation-trigger-app-description"))
+                        .trailing(exe_field)
+                        .render(k),
+                    );
+                }
+                rows.push(
                     Row::new(
                         format!("trigger-profile-row-{index}"),
                         tr("automation-apply"),
                     )
                     .trailing(profile)
                     .render(k),
-                ]
+                );
+                rows
             }));
         }
         let has_profiles = !profile_names.is_empty();
@@ -566,22 +560,23 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (kind, field_text, placeholder) = match entry.time {
-            ScheduleTime::Clock { minutes } => (0, clock_text(minutes), "08:00"),
-            ScheduleTime::Sunrise { offset } => (1, offset_text(offset), "0"),
-            ScheduleTime::Sunset { offset } => (2, offset_text(offset), "0"),
+        let kind = match entry.time {
+            ScheduleTime::Clock { .. } => 0,
+            ScheduleTime::Sunrise { .. } => 1,
+            ScheduleTime::Sunset { .. } => 2,
         };
-        let kind_dropdown = kit::dropdown(
+        let kind_labels = [
+            crate::i18n::tr("automation-at-time"),
+            crate::i18n::tr("automation-at-sunrise"),
+            crate::i18n::tr("automation-at-sunset"),
+        ];
+        let kind_labels: Vec<&str> = kind_labels.iter().map(String::as_str).collect();
+        let kind_toggle = kit::segmented(
             k,
             format!("schedule-kind-{index}"),
-            vec![
-                tr("automation-at-time"),
-                tr("automation-at-sunrise"),
-                tr("automation-at-sunset"),
-            ],
-            Some(kind),
+            &kind_labels,
+            kind,
             false,
-            140.0,
             Self::h(cx, move |this, choice: usize, _, cx| {
                 this.edit(cx, move |settings| {
                     if let Some(entry) = settings.schedule.entries.get_mut(index) {
@@ -594,30 +589,46 @@ impl SettingsWindow {
                 });
             }),
         );
-        let time_input = self.input(
-            format!("schedule-time-{index}-{kind}"),
-            &field_text,
-            placeholder,
-            window,
-            cx,
-            move |this, text, _, _, cx| {
-                let time = match kind {
-                    0 => parse_clock(&text).map(|minutes| ScheduleTime::Clock { minutes }),
-                    1 => parse_offset(&text).map(|offset| ScheduleTime::Sunrise { offset }),
-                    _ => parse_offset(&text).map(|offset| ScheduleTime::Sunset { offset }),
-                };
-                let Some(time) = time else {
-                    this.show_notice(tr("automation-time-invalid"), cx);
-                    return;
-                };
-                this.edit(cx, move |settings| {
-                    if let Some(entry) = settings.schedule.entries.get_mut(index) {
-                        entry.time = time;
-                    }
-                });
-            },
-        );
-        let time_field = kit::text_field(k, &time_input, Some(80.0), window, cx);
+        let time_field = match entry.time {
+            ScheduleTime::Clock { minutes } => kit::time_picker(
+                k,
+                format!("schedule-time-{index}"),
+                minutes,
+                Self::h(cx, move |this, minutes: u16, _, cx| {
+                    this.edit(cx, move |settings| {
+                        if let Some(entry) = settings.schedule.entries.get_mut(index) {
+                            entry.time = ScheduleTime::Clock { minutes };
+                        }
+                    });
+                }),
+            ),
+            ScheduleTime::Sunrise { offset } | ScheduleTime::Sunset { offset } => {
+                let input = self.input(
+                    format!("schedule-time-{index}-{kind}"),
+                    &offset_text(offset),
+                    "0",
+                    window,
+                    cx,
+                    move |this, text, _, _, cx| {
+                        let Some(offset) = parse_offset(&text) else {
+                            this.show_notice(tr("automation-time-invalid"), cx);
+                            return;
+                        };
+                        let time = if kind == 1 {
+                            ScheduleTime::Sunrise { offset }
+                        } else {
+                            ScheduleTime::Sunset { offset }
+                        };
+                        this.edit(cx, move |settings| {
+                            if let Some(entry) = settings.schedule.entries.get_mut(index) {
+                                entry.time = time;
+                            }
+                        });
+                    },
+                );
+                kit::text_field(k, &input, Some(80.0), window, cx)
+            }
+        };
         let delete = Button::icon_only(format!("schedule-delete-{index}"), "x-circle-fill")
             .ghost()
             .tooltip(tr("automation-delete"))
@@ -633,8 +644,7 @@ impl SettingsWindow {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .child(kind_dropdown)
-            .child(time_field)
+            .child(kind_toggle)
             .child(delete)
             .into_any_element();
 
@@ -659,34 +669,51 @@ impl SettingsWindow {
             (_, None) => Some(crate::i18n::tr("automation-no-sun-today")),
         };
 
-        let mut targets = vec![tr("automation-target-level")];
-        targets.extend(
-            profile_names
-                .iter()
-                .map(|name| SharedString::from(name.clone())),
-        );
-        let target_index = match entry.target {
-            ScheduleTarget::Level { .. } => 0,
-            ScheduleTarget::Profile { index } => index + 1,
-        };
-        let target_dropdown = kit::dropdown(
+        let is_profile = matches!(entry.target, ScheduleTarget::Profile { .. });
+        let target_labels = [
+            crate::i18n::tr("automation-target-level"),
+            crate::i18n::tr("automation-target-profile"),
+        ];
+        let target_labels: Vec<&str> = target_labels.iter().map(String::as_str).collect();
+        let target_toggle = kit::segmented(
             k,
             format!("schedule-target-{index}"),
-            targets,
-            Some(target_index),
-            false,
-            200.0,
+            &target_labels,
+            usize::from(is_profile),
+            // Without profiles there is nothing to switch to.
+            profile_names.is_empty() && !is_profile,
             Self::h(cx, move |this, choice: usize, _, cx| {
                 this.edit(cx, move |settings| {
                     if let Some(entry) = settings.schedule.entries.get_mut(index) {
                         entry.target = match choice {
                             0 => ScheduleTarget::Level { level: 50 },
-                            profile => ScheduleTarget::Profile { index: profile - 1 },
+                            _ => ScheduleTarget::Profile { index: 0 },
                         };
                     }
                 });
             }),
         );
+        let profile_dropdown = match entry.target {
+            ScheduleTarget::Profile { index: profile } => Some(kit::dropdown(
+                k,
+                format!("schedule-profile-{index}"),
+                profile_names
+                    .iter()
+                    .map(|name| SharedString::from(name.clone()))
+                    .collect(),
+                (profile < profile_names.len()).then_some(profile),
+                false,
+                200.0,
+                Self::h(cx, move |this, choice: usize, _, cx| {
+                    this.edit(cx, move |settings| {
+                        if let Some(entry) = settings.schedule.entries.get_mut(index) {
+                            entry.target = ScheduleTarget::Profile { index: choice };
+                        }
+                    });
+                }),
+            )),
+            ScheduleTarget::Level { .. } => None,
+        };
         let level = match entry.target {
             ScheduleTarget::Level { level } => {
                 let slider = kit::slider(
@@ -715,16 +742,36 @@ impl SettingsWindow {
                     format!("schedule-when-{index}"),
                     crate::i18n::format("automation-entry", &[("number", (index + 1).to_string())]),
                 )
-                .description_opt(k, when_description)
                 .trailing(when)
+                .render(k),
+                Row::new(
+                    format!("schedule-time-row-{index}"),
+                    if kind == 0 {
+                        tr("automation-time")
+                    } else {
+                        tr("automation-offset")
+                    },
+                )
+                .description_opt(k, when_description)
+                .trailing(time_field)
                 .render(k),
                 Row::new(
                     format!("schedule-target-row-{index}"),
                     tr("automation-apply"),
                 )
-                .trailing(target_dropdown)
+                .trailing(target_toggle)
                 .render(k),
             ];
+            if let Some(profile) = profile_dropdown {
+                rows.push(
+                    Row::new(
+                        format!("schedule-profile-row-{index}"),
+                        tr("automation-target-profile"),
+                    )
+                    .trailing(profile)
+                    .render(k),
+                );
+            }
             if let Some(level) = level {
                 rows.push(
                     Row::new(
@@ -761,11 +808,6 @@ mod tests {
 
     #[test]
     fn parses_times_offsets_and_locations() {
-        assert_eq!(parse_clock("7:30"), Some(450));
-        assert_eq!(parse_clock("07.05"), Some(425));
-        assert_eq!(parse_clock("21"), Some(1260));
-        assert_eq!(parse_clock("24:00"), None);
-        assert_eq!(parse_clock("8:60"), None);
         assert_eq!(parse_offset("+30"), Some(30));
         assert_eq!(parse_offset("\u{2212}15"), Some(-15));
         assert_eq!(parse_offset("1000"), None);
@@ -775,7 +817,6 @@ mod tests {
         assert_eq!(normalize_exe(r#""C:\Games\Game.EXE""#), "game.exe");
         assert_eq!(normalize_exe("vlc"), "vlc.exe");
         assert_eq!(normalize_exe("  "), "");
-        assert_eq!(clock_text(450), "07:30");
         assert_eq!(offset_text(-15), "-15");
         assert_eq!(offset_text(30), "+30");
     }

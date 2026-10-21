@@ -2900,6 +2900,178 @@ pub(crate) fn glyph_plate(size: f32, bg: Hsla, content: AnyElement) -> AnyElemen
 const PICKER_ITEM: f32 = 32.0;
 const PICKER_ROWS: f32 = 7.0;
 
+/// Fluent TimePicker: a field showing the time (24-hour) that opens a flyout
+/// with scrollable hour and minute columns. Every pick applies at once; the
+/// flyout closes on an outside click.
+pub(crate) fn time_picker(
+    k: &Kit,
+    id: impl Into<SharedString>,
+    minutes: u16,
+    on_change: Handler<u16>,
+) -> AnyElement {
+    let id: SharedString = id.into();
+    let theme = &k.theme;
+    let minutes = minutes.min(23 * 60 + 59);
+    let (hour, minute) = (minutes / 60, minutes % 60);
+    let open = k.menus.is_open(&id);
+    let menus = k.menus.clone();
+    let toggle_id = id.clone();
+    let trigger_id = format!("time-{id}");
+    let rest = if open {
+        theme.control_hover
+    } else {
+        theme.control
+    };
+    let trigger = hover_bg(
+        k,
+        div().id(eid(trigger_id.clone())),
+        hover_key(&trigger_id),
+        rest,
+        theme.control_hover,
+    )
+    .flex()
+    .items_center()
+    .gap(px(10.0))
+    .h(px(CONTROL_HEIGHT))
+    .px(px(12.0))
+    .w(px(104.0))
+    .rounded(px(CONTROL_RADIUS))
+    .text_size(px(14.0))
+    .line_height(px(20.0))
+    .text_color(theme.text)
+    .on_click(move |_, window, _| menus.toggle(toggle_id.clone(), window))
+    .child(div().flex_1().child(format!("{hour:02}:{minute:02}")))
+    .child(icon("clock-fill", 14.0, theme.text_secondary));
+
+    let mut wrapper = div().relative().flex_none().child(trigger);
+    if !open {
+        k.pickers.borrow_mut().remove(&id);
+        return wrapper.into_any_element();
+    }
+
+    // Columns: (labels, selected index, value -> minutes).
+    type Apply = Rc<dyn Fn(u16) -> u16>;
+    let columns: Vec<(Vec<SharedString>, usize, Apply)> = vec![
+        (
+            (0..24).map(|h| format!("{h:02}").into()).collect(),
+            hour as usize,
+            Rc::new(move |h| h * 60 + minute),
+        ),
+        (
+            (0..60).map(|m| format!("{m:02}").into()).collect(),
+            minute as usize,
+            Rc::new(move |m| hour * 60 + m),
+        ),
+    ];
+
+    let handles = {
+        let mut pickers = k.pickers.borrow_mut();
+        let entry = pickers.entry(id.clone()).or_insert_with(|| {
+            (
+                (0..columns.len())
+                    .map(|_| gpui::ScrollHandle::new())
+                    .collect(),
+                false,
+            )
+        });
+        if !entry.1 {
+            // Center each column's value on open. Rows have a fixed pitch, so
+            // the offset is computed directly: `scroll_to_top_of_item` uses
+            // last frame's bounds, which are stale while the flyout animates.
+            let pitch = PICKER_ITEM + 2.0;
+            let viewport = PICKER_ROWS * pitch;
+            for (handle, (labels, selected, _)) in entry.0.iter().zip(&columns) {
+                let content = labels.len() as f32 * pitch - 2.0;
+                let max = (content - viewport).max(0.0);
+                let top =
+                    (*selected as f32 * pitch - (viewport - PICKER_ITEM) / 2.0).clamp(0.0, max);
+                handle.set_offset(gpui::point(px(0.0), px(-top)));
+            }
+            entry.1 = true;
+        }
+        entry.0.clone()
+    };
+
+    let mut panel_columns = div().flex().gap(px(4.0));
+    for (column_index, ((labels, selected, apply), handle)) in
+        columns.into_iter().zip(handles).enumerate()
+    {
+        let mut list = div()
+            .id(eid(format!("time-{id}-col-{column_index}")))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .w(px(60.0))
+            .h(px(PICKER_ROWS * (PICKER_ITEM + 2.0)))
+            .overflow_y_scroll()
+            .track_scroll(&handle);
+        for (index, label) in labels.into_iter().enumerate() {
+            let is_selected = index == selected;
+            let item_id = format!("time-{id}-{column_index}-{index}");
+            let apply = Rc::clone(&apply);
+            let on_change = Rc::clone(&on_change);
+            let (rest, hover, fg) = if is_selected {
+                (theme.accent, theme.accent_hover, theme.on_accent)
+            } else {
+                (gpui::transparent_black(), theme.subtle_hover, theme.text)
+            };
+            let mut item = hover_bg(
+                k,
+                div().id(eid(item_id.clone())),
+                hover_key(&item_id),
+                rest,
+                hover,
+            )
+            .flex_none()
+            .h(px(PICKER_ITEM))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(CONTROL_RADIUS))
+            .text_size(px(14.0))
+            .line_height(px(20.0))
+            .text_color(fg)
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                on_change(apply(index as u16), window, cx)
+            })
+            .child(label);
+            if is_selected {
+                item = item.font_weight(FontWeight::SEMIBOLD);
+            }
+            list = list.child(item);
+        }
+        panel_columns = panel_columns.child(list);
+    }
+
+    let menus = k.menus.clone();
+    let panel = div()
+        .id(eid(format!("time-panel-{id}")))
+        .occlude()
+        .mt(px(4.0))
+        .p(px(4.0))
+        .rounded(px(10.0))
+        .bg(theme.popover)
+        .shadow(float_shadow(theme, 8.0))
+        .on_mouse_down_out(move |_, window, _| menus.close(window))
+        .child(panel_columns);
+    let panel: AnyElement = if k.animate() {
+        panel
+            .with_animation(
+                eid(format!("time-anim-{id}")),
+                Animation::new(Duration::from_millis(167)).with_easing(fx::ease_out_cubic),
+                |el, delta| el.opacity(delta).mt(px(4.0 - (1.0 - delta) * 8.0)),
+            )
+            .into_any_element()
+    } else {
+        panel.into_any_element()
+    };
+    wrapper = wrapper.child(div().absolute().top_full().left_0().child(
+        deferred(anchored().snap_to_window_with_margin(px(8.0)).child(panel)).with_priority(2),
+    ));
+    wrapper.into_any_element()
+}
+
 /// Anchors `content` in a floating panel below `trigger` while the menu `id`
 /// is open, using the same chrome and entrance motion as the time picker.
 pub(crate) fn flyout(

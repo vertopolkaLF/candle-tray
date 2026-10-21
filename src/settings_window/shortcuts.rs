@@ -75,27 +75,27 @@ impl SettingsWindow {
                     Some(tr("shortcuts-turn-off-description")),
                     cx,
                 ),
-                kit::dropdown_row(
-                    k,
-                    "shortcuts-turn-off-mode",
-                    tr("settings-turn-off-mode"),
-                    None,
-                    vec![
-                        tr("settings-turn-off-windows"),
-                        tr("settings-turn-off-ddc"),
-                        tr("settings-turn-off-both"),
-                    ],
-                    turn_off_index,
-                    false,
-                    Self::h(cx, |this, index: usize, _, cx| {
-                        let mode = match index {
-                            1 => TurnOffSetting::Ddc,
-                            2 => TurnOffSetting::Both,
-                            _ => TurnOffSetting::Windows,
-                        };
-                        this.edit(cx, move |settings| settings.turn_off = mode);
-                    }),
-                ),
+                Row::new("shortcuts-turn-off-mode-row", tr("settings-turn-off-mode"))
+                    .trailing(kit::segmented(
+                        k,
+                        "shortcuts-turn-off-mode",
+                        &[
+                            crate::i18n::tr("settings-turn-off-windows").as_str(),
+                            crate::i18n::tr("settings-turn-off-ddc").as_str(),
+                            crate::i18n::tr("settings-turn-off-both").as_str(),
+                        ],
+                        turn_off_index,
+                        false,
+                        Self::h(cx, |this, index: usize, _, cx| {
+                            let mode = match index {
+                                1 => TurnOffSetting::Ddc,
+                                2 => TurnOffSetting::Both,
+                                _ => TurnOffSetting::Windows,
+                            };
+                            this.edit(cx, move |settings| settings.turn_off = mode);
+                        }),
+                    ))
+                    .render(k),
             ]
         });
 

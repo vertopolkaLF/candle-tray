@@ -50,7 +50,22 @@ pub fn initialize(settings_path: &Path) -> Result<PathBuf> {
     let _ = LOG_PATH.set(path.clone());
     info("Candle Tray started");
     info(format!("Log file: {}", path.display()));
+    install_panic_hook();
     Ok(path)
+}
+
+/// Writes panics to the log before the default hook runs: the app has no
+/// console, so a crash would otherwise leave no trace.
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        error(format!(
+            "panic: {panic}
+{}",
+            std::backtrace::Backtrace::force_capture()
+        ));
+        default(panic);
+    }));
 }
 
 fn rotate_log(path: &Path) -> Result<()> {

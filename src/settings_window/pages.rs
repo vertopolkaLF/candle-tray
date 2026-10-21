@@ -117,25 +117,27 @@ impl SettingsWindow {
                         this.edit(cx, move |settings| settings.language = language);
                     }),
                 ),
-                kit::dropdown_row(
-                    k,
-                    "general-theme",
-                    tr("settings-theme"),
-                    None,
-                    theme_labels.iter().map(|l| l.clone().into()).collect(),
-                    theme_index,
-                    false,
-                    Self::h(cx, |this, index: usize, _, cx| {
-                        let theme = match index {
-                            1 => Theme::Light,
-                            2 => Theme::Dark,
-                            _ => Theme::Auto,
-                        };
-                        this.edit(cx, move |settings| settings.theme = theme);
-                        // The popup resolves its palette from settings.
-                        crate::popup::send_command(crate::popup::PopupCommand::AppearanceChanged);
-                    }),
-                ),
+                Row::new("general-theme-row", tr("settings-theme"))
+                    .trailing(kit::segmented(
+                        k,
+                        "general-theme",
+                        &theme_labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                        theme_index,
+                        false,
+                        Self::h(cx, |this, index: usize, _, cx| {
+                            let theme = match index {
+                                1 => Theme::Light,
+                                2 => Theme::Dark,
+                                _ => Theme::Auto,
+                            };
+                            this.edit(cx, move |settings| settings.theme = theme);
+                            // The popup resolves its palette from settings.
+                            crate::popup::send_command(
+                                crate::popup::PopupCommand::AppearanceChanged,
+                            );
+                        }),
+                    ))
+                    .render(k),
                 kit::dropdown_row(
                     k,
                     "general-material",
