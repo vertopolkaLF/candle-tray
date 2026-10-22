@@ -108,10 +108,12 @@ To bring over an existing setup, use the Twinkle Tray settings import offered by
 
 ## Updating
 
-Candle Tray checks for a new release at startup and once a day (Settings → About can turn this
-off). An update is only installed when you choose **Update** in the flyout or on the About
-page: the app downloads the portable ZIP for its architecture, verifies its SHA-256 and
-restarts into the new version. Both the installed and the portable version update this way.
+Candle Tray checks for a new release at startup and every hour (Settings → About can turn this
+off). A Windows notification shows the app icon and **Install update** and **View Release**
+buttons. Choose **Install update**, or **Update** in the flyout or on the About page, to
+download the portable ZIP for your architecture, verify its SHA-256 and restart into the new
+version. A notification confirms the successful update after relaunch. Both the installed
+and the portable version update this way.
 
 <p align="center">
   <img src="docs/media/settings-about.png" alt="About page with update controls">

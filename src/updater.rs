@@ -38,7 +38,7 @@ const UPDATE_STAGING_DIR: &str = ".update-staging";
 /// Hard upper bound for a downloaded release package.
 const MAX_UPDATE_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
 /// How often a running app looks for a new release.
-const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 /// Minimum spacing of progress repaints.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -91,6 +91,34 @@ struct State {
     install_failed: bool,
     /// The popup offer was dismissed for this version.
     dismissed: Option<String>,
+    notified: Option<String>,
+}
+
+impl State {
+    fn take_install(&mut self, requested: Option<&str>) -> Option<AvailableUpdate> {
+        let UpdatePhase::Available(update) = &self.phase else {
+            return None;
+        };
+        if !accepts_requested_version(update, requested) {
+            return None;
+        }
+        let update = update.clone();
+        self.install_failed = false;
+        self.phase = UpdatePhase::Installing {
+            version: update.version.clone(),
+            progress: None,
+        };
+        Some(update)
+    }
+}
+
+fn accepts_requested_version(update: &AvailableUpdate, requested: Option<&str>) -> bool {
+    requested.is_none_or(|version| {
+        Version::parse(&update.version)
+            .ok()
+            .zip(Version::parse(version).ok())
+            .is_some_and(|(available, requested)| available >= requested)
+    })
 }
 
 static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
@@ -98,10 +126,14 @@ static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| {
         phase: UpdatePhase::Idle,
         install_failed: false,
         dismissed: None,
+        notified: None,
     })
 });
 static AUTO_CHECK: AtomicBool = AtomicBool::new(false);
 static CHECKER_STARTED: AtomicBool = AtomicBool::new(false);
+// Serializes release checks with accepting an install. Install requests
+// wait on their worker thread, keeping the UI responsive during a check.
+static OPERATION: Mutex<()> = Mutex::new(());
 static CHECK_NOW: (Mutex<bool>, std::sync::Condvar) =
     (Mutex::new(false), std::sync::Condvar::new());
 
@@ -155,7 +187,7 @@ pub fn dismiss_offer() {
 }
 
 /// Turn the automatic checks on or off. The first call starts the checker,
-/// which looks right away and then once a day; turning it on checks now.
+/// which looks at startup and then every hour; turning it on checks now.
 pub fn set_auto_check(enabled: bool) {
     let was = AUTO_CHECK.swap(enabled, Ordering::SeqCst);
     if !CHECKER_STARTED.swap(true, Ordering::SeqCst) {
@@ -163,6 +195,7 @@ pub fn set_auto_check(enabled: bool) {
             .name("update-checker".into())
             .spawn(checker_loop);
         if let Err(error) = spawned {
+            CHECKER_STARTED.store(false, Ordering::SeqCst);
             crate::logger::error(format!("could not start the update checker: {error}"));
         }
     } else if enabled && !was {
@@ -209,17 +242,41 @@ pub fn check_now() {
 }
 
 fn check_once() {
-    if matches!(
-        phase(),
-        UpdatePhase::Installing { .. } | UpdatePhase::Restarting
-    ) {
+    let Ok(_operation) = OPERATION.try_lock() else {
         return;
+    };
+    check_once_locked();
+}
+
+fn check_once_locked() {
+    {
+        let mut state = state();
+        if matches!(
+            state.phase,
+            UpdatePhase::Checking | UpdatePhase::Installing { .. } | UpdatePhase::Restarting
+        ) {
+            return;
+        }
+        state.phase = UpdatePhase::Checking;
     }
-    set_phase(UpdatePhase::Checking);
+    repaint();
     match check_for_update() {
         Ok(Some(update)) => {
             crate::logger::info(format!("Update available: {}", update.version));
-            set_phase(UpdatePhase::Available(update));
+            let notify = {
+                let mut state = state();
+                state.phase = UpdatePhase::Available(update.clone());
+                state.notified.as_deref() != Some(update.version.as_str())
+            };
+            repaint();
+            if notify {
+                match crate::notifications::update_available(&update) {
+                    Ok(()) => state().notified = Some(update.version),
+                    Err(error) => crate::logger::error(format!(
+                        "could not show update notification: {error:#}"
+                    )),
+                }
+            }
         }
         Ok(None) => set_phase(UpdatePhase::UpToDate),
         Err(error) => {
@@ -232,19 +289,18 @@ fn check_once() {
 /// Download and install the available update, then exit so the helper can
 /// replace the files. Runs in the background; progress shows in the UI.
 pub fn install() {
+    request_install(None);
+}
+
+fn begin_install(requested_version: Option<&str>) {
     let update = {
-        let mut state = state();
-        let UpdatePhase::Available(update) = state.phase.clone() else {
+        let Some(update) = state().take_install(requested_version) else {
             return;
-        };
-        state.install_failed = false;
-        state.phase = UpdatePhase::Installing {
-            version: update.version.clone(),
-            progress: None,
         };
         update
     };
     repaint();
+    let retry = update.clone();
     let spawned = thread::Builder::new()
         .name("update-install".into())
         .spawn(move || match apply_update(&update) {
@@ -269,9 +325,35 @@ pub fn install() {
         crate::logger::error(format!("could not start the update: {error}"));
         let mut state = state();
         state.install_failed = true;
-        if let UpdatePhase::Installing { .. } = state.phase {
-            state.phase = UpdatePhase::Idle;
-        }
+        state.phase = UpdatePhase::Available(retry);
+        drop(state);
+        repaint();
+    }
+}
+
+/// A persisted toast may outlive the process or the cached release. Resolve
+/// its release again on a worker, then use the same installer as the UI. If
+/// another release superseded that toast, install the newer release instead.
+pub fn install_from_notification(version: String) {
+    request_install(Some(version));
+}
+
+fn request_install(version: Option<String>) {
+    let spawned = thread::Builder::new()
+        .name("update-activation".into())
+        .spawn(move || {
+            let _operation = OPERATION
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if version.is_some()
+                && !matches!(phase(), UpdatePhase::Available(ref update) if accepts_requested_version(update, version.as_deref()))
+            {
+                check_once_locked();
+            }
+            begin_install(version.as_deref());
+        });
+    if let Err(error) = spawned {
+        crate::logger::error(format!("could not start update request: {error}"));
     }
 }
 
@@ -303,8 +385,26 @@ impl ProgressThrottle {
 /// Startup housekeeping: logs a finished update, keeps the "Installed apps"
 /// version current and removes leftover staging.
 pub fn startup() {
+    // Run after language selection; notifications and housekeeping stay off
+    // the startup/UI thread.
+    if let Err(error) = thread::Builder::new()
+        .name("update-startup".into())
+        .spawn(startup_worker)
+    {
+        crate::logger::error(format!("could not start update housekeeping: {error}"));
+    }
+}
+
+fn startup_worker() {
     match take_post_update_marker() {
-        Ok(Some(version)) => crate::logger::info(format!("Updated to {version}")),
+        Ok(Some(version)) => {
+            crate::logger::info(format!("Updated to {version}"));
+            if let Err(error) = crate::notifications::update_complete(&version) {
+                crate::logger::error(format!(
+                    "could not show update success notification: {error:#}"
+                ));
+            }
+        }
         Ok(None) => {}
         Err(error) => crate::logger::error(format!("could not read the update marker: {error:#}")),
     }
@@ -386,12 +486,19 @@ fn take_post_update_marker() -> Result<Option<String>> {
     if !path.exists() {
         return Ok(None);
     }
-    let version = fs::read_to_string(&path)
+    take_post_update_marker_at(&path, &current_version())
+}
+
+fn take_post_update_marker_at(path: &Path, running: &Version) -> Result<Option<String>> {
+    let version = fs::read_to_string(path)
         .with_context(|| format!("read {}", path.display()))?
+        .trim_start_matches('\u{feff}')
         .trim()
         .to_string();
-    let _ = fs::remove_file(&path);
-    Ok((!version.is_empty()).then_some(version))
+    fs::remove_file(path).context("consume update success marker")?;
+    // Windows PowerShell writes a UTF-8 BOM. Only the matching new binary
+    // confirms success, never an old executable relaunched after a failed copy.
+    Ok((Version::parse(&version).ok().as_ref() == Some(running)).then_some(version))
 }
 
 #[derive(Debug, Deserialize)]
@@ -582,7 +689,7 @@ try {{
         Set-ItemProperty -LiteralPath $key -Name DisplayVersion -Value '{version}'
     }}
 }} finally {{
-    Start-Process -FilePath $exe -WorkingDirectory $install
+    Start-Process -FilePath $exe -WorkingDirectory $install -WindowStyle Hidden
     Start-Sleep -Seconds 2
     if (Test-Path -LiteralPath $staging) {{
         Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
@@ -826,6 +933,53 @@ mod tests {
             assert_eq!(parse_release_version(tag).unwrap(), Version::new(1, 2, 3));
         }
         assert!(parse_release_version("latest").is_err());
+    }
+
+    #[test]
+    fn success_marker_requires_the_running_version_and_handles_powershell_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(UPDATE_SUCCESS_MARKER);
+        fs::write(&marker, "\u{feff}1.2.3\r\n").unwrap();
+        assert_eq!(
+            take_post_update_marker_at(&marker, &Version::new(1, 2, 3)).unwrap(),
+            Some("1.2.3".into())
+        );
+        assert!(!marker.exists());
+        for invalid in ["1.2.4", "", "invalid"] {
+            fs::write(&marker, invalid).unwrap();
+            assert_eq!(
+                take_post_update_marker_at(&marker, &Version::new(1, 2, 3)).unwrap(),
+                None
+            );
+            assert!(!marker.exists());
+        }
+    }
+
+    #[test]
+    fn notification_install_accepts_newer_releases_and_rejects_duplicate_clicks() {
+        let update = AvailableUpdate {
+            version: "1.3.0".into(),
+            asset_url: String::new(),
+            html_url: String::new(),
+            size: None,
+            sha256: None,
+        };
+        let mut state = State {
+            phase: UpdatePhase::Available(update.clone()),
+            install_failed: true,
+            dismissed: None,
+            notified: None,
+        };
+        assert!(state.take_install(Some("1.4.0")).is_none());
+        assert!(state.take_install(Some("invalid")).is_none());
+        assert_eq!(state.take_install(Some("1.2.0")), Some(update));
+        assert!(!state.install_failed);
+        assert!(
+            matches!(state.phase, UpdatePhase::Installing { ref version, progress: None } if version == "1.3.0")
+        );
+        assert!(state.take_install(Some("1.2.0")).is_none());
+        state.phase = UpdatePhase::Restarting;
+        assert!(state.take_install(None).is_none());
     }
 
     #[test]

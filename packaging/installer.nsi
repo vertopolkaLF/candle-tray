@@ -133,6 +133,7 @@ Section "Uninstall"
 
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Candle Tray"
   DeleteRegKey SHCTX "Software\Microsoft\Windows\CurrentVersion\Uninstall\{{PRODUCT_NAME}}"
+  DeleteRegKey HKCU "Software\Classes\candle-tray"
 
   ; Keep settings in $APPDATA\Candle Tray silently, and preserve unrelated files.
   Delete "$INSTDIR\candle-tray.exe"

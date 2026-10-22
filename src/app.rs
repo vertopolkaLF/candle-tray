@@ -323,6 +323,10 @@ impl AppModel {
     /// for the first snapshot, after restore/schedule initialization.
     pub fn run_cli(&mut self, command: crate::cli::Command, cx: &mut Context<Self>) {
         use crate::cli::Command as Cli;
+        if let Cli::InstallUpdate(version) = command {
+            crate::updater::install_from_notification(version);
+            return;
+        }
         if command == Cli::Show {
             crate::popup::show_near_cursor();
             return;
@@ -348,7 +352,7 @@ impl AppModel {
                     self.turn_off(cx);
                     return Ok(());
                 }
-                Cli::Show => unreachable!(),
+                Cli::Show | Cli::InstallUpdate(_) => unreachable!(),
             };
             let rows = self.rows();
             let entries = rows

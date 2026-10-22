@@ -19,6 +19,7 @@ pub enum Command {
     Off,
     Input(u8, Selector),
     Show,
+    InstallUpdate(String),
 }
 
 fn position(value: &str) -> Result<usize> {
@@ -69,6 +70,16 @@ fn input(value: &str) -> Result<u8> {
 /// Arguments exclude the executable name. Empty arguments retain normal startup.
 /// One action and at most one selector are accepted, in either order.
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Command>> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    if let [uri] = args.as_slice() {
+        if uri == crate::notifications::SHOW_URI {
+            return Ok(Some(Command::Show));
+        }
+        if let Some(version) = uri.strip_prefix(crate::notifications::INSTALL_URI_PREFIX) {
+            let version = semver::Version::parse(version)?;
+            return Ok(Some(Command::InstallUpdate(version.to_string())));
+        }
+    }
     let mut args = args.into_iter();
     let mut action = None;
     let mut target = None;
@@ -247,6 +258,30 @@ mod tests {
             (vec!["--show"], Some(Command::Show)),
         ] {
             assert_eq!(parse_args(&args).unwrap(), expected, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn notification_protocol_is_strict_and_survives_ipc_serialization() {
+        let command = parse_args(&["candle-tray://install-update/1.2.3"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(command, Command::InstallUpdate("1.2.3".into()));
+        let payload = serde_json::to_vec(&command).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Command>(&payload).unwrap(),
+            command
+        );
+        assert_eq!(
+            parse_args(&["candle-tray://show"]).unwrap(),
+            Some(Command::Show)
+        );
+        for args in [
+            vec!["candle-tray://install-update/"],
+            vec!["candle-tray://install-update/1.2.3?url=https://example.com"],
+            vec!["candle-tray://install-update/1.2.3", "--off"],
+        ] {
+            assert!(parse_args(&args).is_err());
         }
     }
 
