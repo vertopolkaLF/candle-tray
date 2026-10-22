@@ -94,7 +94,7 @@ impl SettingsWindow {
             |this, text, _, _, cx| {
                 let parsed = parse_location(&text);
                 if parsed.is_none() && !text.trim().is_empty() {
-                    this.show_notice(tr("automation-location-invalid"), cx);
+                    this.show_error(tr("automation-location-invalid"), cx);
                     return;
                 }
                 this.edit(cx, move |settings| {
@@ -317,7 +317,7 @@ impl SettingsWindow {
                             error.downcast_ref::<crate::location::LocationError>(),
                             Some(crate::location::LocationError::Denied)
                         );
-                        this.show_notice(
+                        this.show_error(
                             if denied {
                                 tr("automation-location-denied")
                             } else {
@@ -611,7 +611,7 @@ impl SettingsWindow {
                     cx,
                     move |this, text, _, _, cx| {
                         let Some(offset) = parse_offset(&text) else {
-                            this.show_notice(tr("automation-time-invalid"), cx);
+                            this.show_error(tr("automation-time-invalid"), cx);
                             return;
                         };
                         let time = if kind == 1 {

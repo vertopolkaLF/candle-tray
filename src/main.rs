@@ -29,7 +29,6 @@ fn run() -> Result<()> {
         return Ok(());
     };
     logger::initialize(&path)?;
-    candle_tray::updater::startup();
     // Queue the initial command before installing the hook, preserving order
     // when second launches arrive during startup.
     if let Some(command) = command {
@@ -52,6 +51,7 @@ fn run() -> Result<()> {
     });
     let settings = store.snapshot();
     candle_tray::i18n::set_language(settings.language);
+    candle_tray::updater::startup();
     popup::apply_popup_appearance(settings.popup_material);
     candle_tray::tray::set_icon(settings.tray_icon);
     if let Err(error) = candle_tray::autostart::set_enabled(settings.launch_at_startup) {
@@ -89,6 +89,8 @@ fn run() -> Result<()> {
         .detach();
         if let Some(pending) = import_offer {
             model.update(cx, |model, cx| model.offer_import(pending, cx));
+            // Put the offer in front of the user rather than waiting for a tray click.
+            popup::show_near_cursor();
         }
         candle_tray::automation::start(model.clone(), cx);
         model

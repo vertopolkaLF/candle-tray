@@ -368,6 +368,11 @@ impl PopupRoot {
         match self.host.phase {
             Phase::Hidden | Phase::Prewarm | Phase::Closing(..) => {}
             _ => {
+                // Dismissing the popup without answering the import offer declines it.
+                if self.model.read(cx).import_offer.is_some() {
+                    self.model
+                        .update(cx, |model, cx| model.answer_import(false, cx));
+                }
                 let from = self.host.offset;
                 if super::animations_enabled() {
                     self.host.phase = Phase::Closing(Instant::now(), from);

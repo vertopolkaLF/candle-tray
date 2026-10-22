@@ -1,7 +1,10 @@
 //! The General and Monitors pages.
 
+use std::path::Path;
+
 use gpui::{
-    AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px,
+    AnyElement, Context, IntoElement, ParentElement, PathPromptOptions, SharedString, Styled,
+    Window, div, px,
 };
 
 use super::kit::{self, Button, Kit, Row, SliderRange};
@@ -278,6 +281,22 @@ impl SettingsWindow {
             ]
         });
 
+        let backup = kit::card_of(k, |k| {
+            let import = Button::new("general-backup-import", tr("settings-backup-import"))
+                .on_click(Self::h(cx, |this, (), _, cx| this.import_settings_file(cx)))
+                .render(k);
+            let export = Button::new("general-backup-export", tr("settings-backup-export"))
+                .on_click(Self::h(cx, |this, (), _, cx| this.export_settings_file(cx)))
+                .render(k);
+            vec![
+                Row::new("general-backup-row", tr("settings-backup"))
+                    .description(k, tr("settings-backup-description"))
+                    .trailing(import)
+                    .trailing(export)
+                    .render(k),
+            ]
+        });
+
         vec![
             kit::section_heading(k, tr("settings-section-appearance")),
             appearance,
@@ -285,12 +304,13 @@ impl SettingsWindow {
             behavior,
             kit::section_heading(k, tr("settings-section-migration")),
             import,
+            backup,
         ]
     }
 
     fn import_twinkle(&mut self, cx: &mut Context<Self>) {
         let Some(path) = crate::twinkle_import::find() else {
-            self.show_notice(tr("settings-import-none"), cx);
+            self.show_error(tr("settings-import-none"), cx);
             return;
         };
         match crate::twinkle_import::load(&path) {
@@ -305,9 +325,69 @@ impl SettingsWindow {
             }
             Err(error) => {
                 crate::logger::error(format!("Twinkle Tray import failed: {error:#}"));
-                self.show_notice(tr("settings-import-failed"), cx);
+                self.show_error(tr("settings-import-failed"), cx);
             }
         }
+    }
+
+    fn export_settings_file(&mut self, cx: &mut Context<Self>) {
+        let settings = self.model.read(cx).settings.clone();
+        let directory = directories::UserDirs::new()
+            .and_then(|dirs| dirs.document_dir().map(Path::to_path_buf))
+            .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
+            .unwrap_or_default();
+        let prompt = cx.prompt_for_new_path(&directory, Some("candle-tray-settings.toml"));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = prompt.await else {
+                return;
+            };
+            let result = settings.save(&path);
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(()) => this.show_notice(tr("settings-backup-exported"), cx),
+                Err(error) => {
+                    crate::logger::error(format!("settings export failed: {error:#}"));
+                    this.show_error(tr("settings-backup-export-failed"), cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn import_settings_file(&mut self, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = prompt.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let result = std::fs::read_to_string(&path)
+                .map_err(anyhow::Error::from)
+                .and_then(|raw| crate::settings::Settings::from_toml(&raw));
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(settings) => {
+                    this.model
+                        .update(cx, |model, cx| model.replace_settings(settings, cx));
+                    // The popup resolves its palette from settings.
+                    crate::popup::send_command(crate::popup::PopupCommand::AppearanceChanged);
+                    this.show_notice(tr("settings-backup-imported"), cx);
+                }
+                Err(error) => {
+                    crate::logger::error(format!(
+                        "settings import from {} failed: {error:#}",
+                        path.display()
+                    ));
+                    this.show_error(tr("settings-backup-import-failed"), cx);
+                }
+            });
+        })
+        .detach();
     }
 
     pub(super) fn monitors_page(

@@ -445,7 +445,7 @@ pub struct Settings {
     /// Profiles applied by the foreground app or the power source.
     pub triggers: Vec<ProfileTrigger>,
     pub adaptive: AdaptiveBrightness,
-    /// Look for a new release at startup and once a day.
+    /// Look for a new release at startup and every hour.
     pub check_for_updates: bool,
 }
 
@@ -536,6 +536,13 @@ impl Settings {
         if settings.migrate()? {
             settings.save(path)?;
         }
+        Ok(settings)
+    }
+
+    /// Parse a settings file exported by this or an older version.
+    pub fn from_toml(raw: &str) -> Result<Self> {
+        let mut settings: Self = toml::from_str(raw).context("decode settings")?;
+        settings.migrate()?;
         Ok(settings)
     }
 

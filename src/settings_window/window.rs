@@ -89,7 +89,7 @@ pub(crate) struct SettingsWindow {
     scroll_glide: Option<f32>,
     inputs: Inputs<Self>,
     /// A short confirmation shown at the bottom of the page.
-    pub(super) notice: Option<(SharedString, u64)>,
+    pub(super) notice: Option<(SharedString, kit::Severity, u64)>,
     notice_generation: u64,
     /// Action whose shortcut button is waiting for a key combination.
     pub(super) hotkey_recording: Option<crate::hotkey::Action>,
@@ -204,13 +204,25 @@ impl SettingsWindow {
     }
 
     pub(super) fn show_notice(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.notify(message.into(), kit::Severity::Success, cx);
+    }
+
+    pub(super) fn show_error(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.notify(message.into(), kit::Severity::Critical, cx);
+    }
+
+    fn notify(&mut self, message: SharedString, severity: kit::Severity, cx: &mut Context<Self>) {
         self.notice_generation = self.notice_generation.wrapping_add(1);
         let generation = self.notice_generation;
-        self.notice = Some((message.into(), generation));
+        self.notice = Some((message, severity, generation));
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(4)).await;
             let _ = this.update(cx, |this, cx| {
-                if this.notice.as_ref().is_some_and(|(_, g)| *g == generation) {
+                if this
+                    .notice
+                    .as_ref()
+                    .is_some_and(|(_, _, g)| *g == generation)
+                {
                     this.notice = None;
                     cx.notify();
                 }
@@ -436,14 +448,14 @@ impl SettingsWindow {
                     .pb(px(48.0))
                     .child(body),
             );
-        let notice = self.notice.as_ref().map(|(message, generation)| {
+        let notice = self.notice.as_ref().map(|(message, severity, generation)| {
             kit::appear(
                 k,
                 format!("notice-{generation}"),
                 div()
                     .shadow_lg()
                     .rounded(px(kit::CARD_RADIUS))
-                    .child(kit::info_bar(k, kit::Severity::Success, message.clone()))
+                    .child(kit::info_bar(k, *severity, message.clone()))
                     .into_any_element(),
             )
         });

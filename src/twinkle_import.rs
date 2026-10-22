@@ -30,7 +30,8 @@
 //!   by fixed fade presets, since Candle does not interpolate between events.
 //!
 //! Discovery checks roaming app-name directories including appx/arm64 variants
-//! (package.json:2,14-19), normal and development JSON names (electron.js:23-25).
+//! (package.json:2,14-19), normal and development JSON names (electron.js:23-25),
+//! both under APPDATA and under a Store package's virtualized LocalCache.
 //! Portable installations use an arbitrary adjacent `config/`; pass that file
 //! explicitly to `load`, since its location cannot be inferred from APPDATA.
 //! Calibration curves, gamma/software brightness and SDR-as-main-slider have no
@@ -74,20 +75,43 @@ pub struct ImportReport {
 }
 pub fn find() -> Option<PathBuf> {
     let base = directories::BaseDirs::new()?;
-    for directory in [
-        "twinkle-tray",
-        "twinkle-tray-appx",
-        "twinkle-tray-arm64",
-        "twinkle-tray-portable",
-    ] {
-        for file in ["settings.json", "settings-dev.json"] {
-            let path = base.config_dir().join(directory).join(file);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
+    // Microsoft Store (MSIX) builds virtualize APPDATA into the package's
+    // LocalCache, so look there as well.
+    let mut roots = vec![base.config_dir().to_path_buf()];
+    if let Ok(packages) = fs::read_dir(base.data_local_dir().join("Packages")) {
+        roots.extend(
+            packages
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains("twinkletray")
+                })
+                .map(|entry| entry.path().join("LocalCache").join("Roaming")),
+        );
     }
-    None
+    // With several installations, the most recently used one wins.
+    roots
+        .iter()
+        .flat_map(|root| {
+            [
+                "twinkle-tray",
+                "twinkle-tray-appx",
+                "twinkle-tray-arm64",
+                "twinkle-tray-portable",
+            ]
+            .into_iter()
+            .flat_map(move |directory| {
+                ["settings.json", "settings-dev.json"]
+                    .into_iter()
+                    .map(move |file| root.join(directory).join(file))
+            })
+        })
+        .filter_map(|path| Some((fs::metadata(&path).ok()?.modified().ok()?, path)))
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
 }
 pub fn load(path: &Path) -> Result<PendingImport> {
     let settings: Value = serde_json::from_str(
