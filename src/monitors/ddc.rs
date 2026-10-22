@@ -112,12 +112,16 @@ impl Ddc {
         false
     }
     pub fn read(&self, code: u8) -> Option<(u32, u32)> {
+        self.read_raw(code).filter(|(_, max)| *max > 0)
+    }
+    /// Discrete VCP features may report no meaningful maximum. Raw actions
+    /// need their current value without the percentage reader's max check.
+    pub fn read_raw(&self, code: u8) -> Option<(u32, u32)> {
         let (mut current, mut max) = (0, 0);
         self.retry(|| unsafe {
             GetVCPFeatureAndVCPFeatureReply(self.0, code, None, &mut current, Some(&mut max))
         })
         .then_some((current, max))
-        .filter(|(_, max)| *max > 0)
     }
     pub fn set(&self, code: u8, value: u32) -> bool {
         self.retry(|| unsafe { SetVCPFeature(self.0, code, value) })

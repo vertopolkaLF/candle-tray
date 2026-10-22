@@ -1477,6 +1477,107 @@ impl PopupRoot {
                 cx,
             ));
         }
+        // A separate SDR slider is a level, so it follows linking like contrast.
+        if !header_only
+            && !row.settings.sdr_primary
+            && row.monitor.brightness.is_some()
+            && let Some(sdr) = row.monitor.sdr
+        {
+            let model = self.model.clone();
+            let id = row.monitor.id.clone();
+            let on_change: slider::Handler = Rc::new(move |value, _, cx| {
+                model.update(cx, |model, cx| {
+                    model.execute_actions(
+                        &[crate::actions::Action {
+                            selector: crate::cli::Selector::Id(id.clone()),
+                            control: crate::actions::Control::Sdr,
+                            operation: crate::actions::Operation::Set(i32::from(value)),
+                        }],
+                        cx,
+                    )
+                });
+            });
+            card = card.child(self.slider_row(
+                format!("sdr-{}", row.monitor.id),
+                "fluent-brightness",
+                sdr.percent,
+                enabled,
+                on_change,
+                cx,
+            ));
+        }
+        // (code, caption, minimum, maximum, volume). Volume has its own
+        // glyph; custom codes are told apart by their caption.
+        let mut features = Vec::new();
+        if row.settings.show_volume {
+            features.push((0x62, None, 0u16, 100u16, true));
+        }
+        for (code, feature) in &row.settings.vcp_controls {
+            if feature.enabled
+                && let Ok(code) = u8::from_str_radix(code, 16)
+            {
+                let name = if feature.name.is_empty() {
+                    format!("VCP 0x{code:02X}")
+                } else {
+                    feature.name.clone()
+                };
+                features.push((code, Some(name), feature.min, feature.max, false));
+            }
+        }
+        for (code, label, minimum, maximum, volume) in features {
+            let reading = row.monitor.vcp_values.get(&code).copied();
+            let maximum = if volume {
+                reading
+                    .map(|(_, max)| max.min(65535) as u16)
+                    .filter(|max| *max > 0)
+                    .unwrap_or(maximum)
+            } else {
+                maximum
+            };
+            let current = reading.map(|(value, _)| value.min(65535) as u16);
+            let width = maximum.saturating_sub(minimum).max(1);
+            let value = current
+                .map(|value| {
+                    (u32::from(value.saturating_sub(minimum)) * 100 / u32::from(width)).min(100)
+                        as u8
+                })
+                .unwrap_or(0);
+            let model = self.model.clone();
+            let id = row.monitor.id.clone();
+            let on_change: slider::Handler = Rc::new(move |value, _, cx| {
+                let raw = u32::from(minimum) + (u32::from(width) * u32::from(value) + 50) / 100;
+                model.update(cx, |model, cx| {
+                    model.execute_actions(
+                        &[crate::actions::Action {
+                            selector: crate::cli::Selector::Id(id.clone()),
+                            control: crate::actions::Control::Vcp(code),
+                            operation: crate::actions::Operation::Set(raw.min(65535) as i32),
+                        }],
+                        cx,
+                    )
+                });
+            });
+            if let Some(label) = label {
+                card = card.child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(palette.text_secondary)
+                        .child(label),
+                );
+            }
+            card = card.child(self.slider_row(
+                format!("extra-{}-{code}", row.monitor.id),
+                if volume {
+                    "fluent-speaker"
+                } else {
+                    "sliders-horizontal-fill"
+                },
+                value,
+                enabled && current.is_some() && maximum > minimum,
+                on_change,
+                cx,
+            ));
+        }
         // Input switching is per display, so it stays while levels are linked.
         if row.settings.show_inputs
             && row.monitor.inputs.len() > 1

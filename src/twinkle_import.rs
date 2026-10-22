@@ -24,7 +24,7 @@
 //!   over action offsets; without it, the first imported offset sets the step
 //!   and incompatible later offsets are skipped. Old monitor/direction records
 //!   follow the legacy v1.16 upgrade (electron.js:1072-1102).
-//! - Idle dimming targets zero (electron.js:5534-5540). Clock, sunrise and sunset
+//! - Idle dimming targets zero (electron.js:5534-5540). Clock and SunCalc
 //!   schedules accept only a single shared level; per-display differences cannot
 //!   be represented without inventing profiles. Legacy animation is approximated
 //!   by fixed fade presets, since Candle does not interpolate between events.
@@ -198,6 +198,7 @@ pub fn load(path: &Path) -> Result<PendingImport> {
                         | "hotkeyPercent"
                         | "hotkeys"
                         | "scrollShortcut"
+                        | "hideClosedLid"
                         | "detectIdleTimeEnabled"
                         | "detectIdleTimeMinutes"
                         | "detectIdleTimeSeconds"
@@ -481,7 +482,19 @@ fn schedule_time(entry: &Value) -> Option<ScheduleTime> {
         return match entry.get("sunCalc")?.as_str()? {
             "sunrise" => Some(ScheduleTime::Sunrise { offset }),
             "sunset" => Some(ScheduleTime::Sunset { offset }),
-            _ => None,
+            name => {
+                use crate::settings::SolarEvent;
+                let event = match name {
+                    "dawn" => SolarEvent::Dawn,
+                    "solarNoon" => SolarEvent::SolarNoon,
+                    "goldenHour" => SolarEvent::GoldenHour,
+                    "sunsetStart" => SolarEvent::SunsetStart,
+                    "dusk" => SolarEvent::Dusk,
+                    "night" => SolarEvent::Night,
+                    _ => return None,
+                };
+                Some(ScheduleTime::Solar { event, offset })
+            }
         };
     }
     let (hour, minute) = if let Some(time) = entry.get("time") {
@@ -526,6 +539,7 @@ fn schedule_entry(entry: &Value, individual: bool) -> Option<ScheduleEntry> {
 fn import_automation(raw: &Value, settings: &mut Settings, report: &mut ImportReport) {
     for (key, target) in [
         ("scrollShortcut", &mut settings.tray_scroll),
+        ("hideClosedLid", &mut settings.hide_closed_lid),
         ("detectIdleTimeEnabled", &mut settings.idle_dim.enabled),
     ] {
         if let Some(value) = raw.get(key).and_then(Value::as_bool) {
@@ -559,13 +573,22 @@ fn import_automation(raw: &Value, settings: &mut Settings, report: &mut ImportRe
             .clamp(1.0, u16::MAX as f64) as u16;
         report.fields += 1;
     }
-    let busy: Vec<_> = ["detectIdleMedia", "detectIdleCheckFullscreen"]
-        .iter()
-        .filter_map(|key| raw.get(key).and_then(Value::as_bool))
-        .collect();
-    if !busy.is_empty() {
-        settings.idle_dim.respect_busy = busy.iter().any(|value| *value);
-        report.fields += 1;
+    for (key, field) in [
+        ("detectIdleMedia", &mut settings.idle_dim.exclude_media),
+        (
+            "detectIdleCheckFullscreen",
+            &mut settings.idle_dim.exclude_fullscreen,
+        ),
+    ] {
+        if let Some(value) = raw.get(key).and_then(Value::as_bool) {
+            *field = Some(value);
+            report.fields += 1;
+        }
+    }
+    // Keep the legacy aggregate for compatibility with external settings readers.
+    if raw.get("detectIdleMedia").is_some() || raw.get("detectIdleCheckFullscreen").is_some() {
+        settings.idle_dim.respect_busy =
+            settings.idle_dim.media_excluded() || settings.idle_dim.fullscreen_excluded();
     }
     if let (Some(latitude), Some(longitude)) = (
         raw.get("adjustmentTimeLatitude").and_then(number),
@@ -841,6 +864,7 @@ mod tests {
     }
     fn display(id: &str, name: &str) -> Monitor {
         Monitor {
+            vcp_values: Default::default(),
             id: id.into(),
             name: name.into(),
             model: "DEL123".into(),
@@ -861,6 +885,39 @@ mod tests {
             unresponsive: false,
         }
     }
+    #[test]
+    fn solar_events_lid_and_independent_idle_options_survive_pending_import() {
+        let import = fixture(
+            r#"{"hideClosedLid":true,"detectIdleMedia":false,"detectIdleCheckFullscreen":true,
+            "adjustmentTimes":[
+                {"useSunCalc":true,"sunCalc":"dawn","offset":-1440,"brightness":10},
+                {"useSunCalc":true,"sunCalc":"solarNoon","brightness":20},
+                {"useSunCalc":true,"sunCalc":"goldenHour","brightness":30},
+                {"useSunCalc":true,"sunCalc":"sunsetStart","brightness":40},
+                {"useSunCalc":true,"sunCalc":"dusk","brightness":50},
+                {"useSunCalc":true,"sunCalc":"night","offset":1440,"brightness":60},
+                {"useSunCalc":true,"sunCalc":"unsupported","brightness":70}
+            ]}"#,
+            None,
+        );
+        let import: PendingImport =
+            serde_json::from_str(&serde_json::to_string(&import).unwrap()).unwrap();
+        let mut settings = Settings::default();
+        let report = import.apply(&mut settings);
+        assert!(settings.hide_closed_lid);
+        assert!(!settings.idle_dim.media_excluded());
+        assert!(settings.idle_dim.fullscreen_excluded());
+        assert_eq!(
+            (
+                report.imported_schedule_entries,
+                report.skipped_schedule_entries
+            ),
+            (6, 1)
+        );
+        let saved = toml::to_string(&settings).unwrap();
+        assert_eq!(toml::from_str::<Settings>(&saved).unwrap(), settings);
+    }
+
     #[test]
     fn brightness_vcp_models_resolve_to_each_instance_and_paths_map_directly() {
         let import = fixture(
@@ -1101,7 +1158,7 @@ mod tests {
                 report.imported_schedule_entries,
                 report.skipped_schedule_entries
             ),
-            (5, 4)
+            (6, 3)
         );
         assert!(settings.schedule.enabled);
         assert_eq!(settings.schedule.latitude, Some(55.75));
@@ -1120,6 +1177,10 @@ mod tests {
                 ScheduleTime::Sunset { offset: 10 },
                 ScheduleTime::Clock { minutes: 5 },
                 ScheduleTime::Clock { minutes: 810 },
+                ScheduleTime::Solar {
+                    event: crate::settings::SolarEvent::Dawn,
+                    offset: 0
+                },
             ]
         );
         assert_eq!(
@@ -1127,7 +1188,7 @@ mod tests {
             ScheduleTarget::Level { level: 75 }
         );
         assert_eq!(import.resolve(&[], &mut settings), report);
-        assert_eq!(settings.schedule.entries.len(), 5);
+        assert_eq!(settings.schedule.entries.len(), 6);
     }
     #[test]
     fn individual_schedule_requires_identical_valid_monitor_levels() {

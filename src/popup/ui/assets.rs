@@ -59,6 +59,9 @@ fn source(name: &str) -> Option<&'static str> {
         "fluent-contrast" => {
             include_str!("../../../assets/icons/fluent-dark-theme-20-regular.svg")
         }
+        "fluent-speaker" => {
+            include_str!("../../../assets/icons/fluent-speaker-2-20-regular.svg")
+        }
         "fluent-brightness" => {
             include_str!("../../../assets/icons/fluent-brightness-high-20-regular.svg")
         }

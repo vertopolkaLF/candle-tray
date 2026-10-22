@@ -7,7 +7,7 @@ use gpui::{
 use super::kit::{self, Button, Kit, Row, SliderRange};
 use super::window::SettingsWindow;
 use crate::settings::{
-    ProfileTrigger, ScheduleEntry, ScheduleTarget, ScheduleTime, TriggerCondition,
+    ProfileTrigger, ScheduleEntry, ScheduleTarget, ScheduleTime, SolarEvent, TriggerCondition,
 };
 
 /// Fade durations offered for schedule changes, in seconds.
@@ -37,19 +37,16 @@ fn offset_text(offset: i16) -> String {
 pub(super) fn parse_offset(text: &str) -> Option<i16> {
     let text = text.trim().trim_start_matches('+').replace('\u{2212}', "-");
     let offset: i16 = text.trim().parse().ok()?;
-    (-720..=720).contains(&offset).then_some(offset)
+    (-1440..=1440).contains(&offset).then_some(offset)
 }
 
-/// The file name of an app as Windows reports it: `C:\Games\Game.exe`
-/// and `game` both become `game.exe`.
+/// Preserve full paths; bare names may omit the .exe suffix.
 pub(super) fn normalize_exe(text: &str) -> String {
     let name = text
         .trim()
         .trim_matches('"')
-        .rsplit(['\\', '/'])
-        .next()
-        .unwrap_or_default()
         .trim()
+        .replace('/', "\\")
         .to_lowercase();
     if name.is_empty() || name.ends_with(".exe") {
         name
@@ -67,6 +64,25 @@ pub(super) fn parse_location(text: &str) -> Option<(f64, f64)> {
         .then_some((latitude, longitude))
 }
 
+fn schedule_kind(kind: usize, offset: i16) -> ScheduleTime {
+    match kind {
+        1 => ScheduleTime::Sunrise { offset },
+        2 => ScheduleTime::Sunset { offset },
+        3..=8 => ScheduleTime::Solar {
+            event: [
+                SolarEvent::Dawn,
+                SolarEvent::SolarNoon,
+                SolarEvent::GoldenHour,
+                SolarEvent::SunsetStart,
+                SolarEvent::Dusk,
+                SolarEvent::Night,
+            ][kind - 3],
+            offset,
+        },
+        _ => ScheduleTime::Clock { minutes: 8 * 60 },
+    }
+}
+
 impl SettingsWindow {
     pub(super) fn automation_page(
         &mut self,
@@ -80,6 +96,23 @@ impl SettingsWindow {
             .collect();
         let schedule = &s.schedule;
         let mut page = vec![kit::section_heading(k, tr("automation-section-schedule"))];
+
+        if self.model.read(cx).automation_paused_by_manual() {
+            let resume = Button::new("automation-resume", tr("automation-resume"))
+                .on_click(Self::h(cx, |this, (), _, cx| {
+                    this.model
+                        .update(cx, |model, cx| model.resume_automation(cx));
+                }))
+                .render(k);
+            page.push(kit::card_of(k, |k| {
+                vec![
+                    Row::new("automation-manual-hold", tr("automation-manual-hold"))
+                        .description(k, tr("automation-manual-hold-description"))
+                        .trailing(resume)
+                        .render(k),
+                ]
+            }));
+        }
 
         let location_text = schedule
             .location()
@@ -270,11 +303,23 @@ impl SettingsWindow {
                 kit::toggle_row(
                     k,
                     "idle-busy",
-                    tr("automation-idle-busy"),
-                    Some(tr("automation-idle-busy-description")),
-                    idle.respect_busy,
+                    tr("automation-idle-fullscreen"),
+                    None,
+                    idle.fullscreen_excluded(),
                     Self::h(cx, |this, value: bool, _, cx| {
-                        this.edit(cx, move |settings| settings.idle_dim.respect_busy = value)
+                        this.edit(cx, move |settings| {
+                            settings.idle_dim.exclude_fullscreen = Some(value)
+                        })
+                    }),
+                ),
+                kit::toggle_row(
+                    k,
+                    "idle-media",
+                    tr("automation-idle-media"),
+                    None,
+                    idle.media_excluded(),
+                    Self::h(cx, |this, value: bool, _, cx| {
+                        this.edit(cx, move |s| s.idle_dim.exclude_media = Some(value));
                     }),
                 ),
             ]
@@ -284,6 +329,39 @@ impl SettingsWindow {
         if crate::light_sensor::available_cached() == Some(true) || s.adaptive.enabled {
             page.extend(self.adaptive_section(k, s.adaptive, cx));
         }
+        let laptop = self
+            .model
+            .read(cx)
+            .monitors
+            .iter()
+            .any(|m| m.kind == crate::monitors::MonitorKind::Internal);
+        page.push(kit::section_heading(k, tr("automation-section-session")));
+        page.push(kit::card_of(k, |k| {
+            let mut rows = vec![kit::toggle_row(
+                k,
+                "pause-locked",
+                tr("automation-pause-locked"),
+                Some(tr("automation-pause-locked-description")),
+                s.pause_when_locked,
+                Self::h(cx, |this, value: bool, _, cx| {
+                    this.edit(cx, move |s| s.pause_when_locked = value);
+                }),
+            )];
+            // Only laptops have a lid; keep a setting that is on reachable.
+            if laptop || s.hide_closed_lid {
+                rows.push(kit::toggle_row(
+                    k,
+                    "hide-closed-lid",
+                    tr("automation-hide-closed-lid"),
+                    Some(tr("automation-hide-closed-lid-description")),
+                    s.hide_closed_lid,
+                    Self::h(cx, |this, value: bool, _, cx| {
+                        this.edit(cx, move |s| s.hide_closed_lid = value);
+                    }),
+                ));
+            }
+            rows
+        }));
         page
     }
 
@@ -436,7 +514,7 @@ impl SettingsWindow {
                     let input = self.input(
                         format!("trigger-exe-{index}"),
                         exe,
-                        "game.exe",
+                        "game.exe / C:\\Games\\game.exe",
                         window,
                         cx,
                         move |this, text, _, _, cx| {
@@ -564,27 +642,37 @@ impl SettingsWindow {
             ScheduleTime::Clock { .. } => 0,
             ScheduleTime::Sunrise { .. } => 1,
             ScheduleTime::Sunset { .. } => 2,
+            ScheduleTime::Solar { event, .. } => match event {
+                SolarEvent::Dawn => 3,
+                SolarEvent::SolarNoon => 4,
+                SolarEvent::GoldenHour => 5,
+                SolarEvent::SunsetStart => 6,
+                SolarEvent::Dusk => 7,
+                SolarEvent::Night => 8,
+            },
         };
         let kind_labels = [
             crate::i18n::tr("automation-at-time"),
             crate::i18n::tr("automation-at-sunrise"),
             crate::i18n::tr("automation-at-sunset"),
+            crate::i18n::tr("automation-at-dawn"),
+            crate::i18n::tr("automation-at-solar-noon"),
+            crate::i18n::tr("automation-at-golden-hour"),
+            crate::i18n::tr("automation-at-sunset-start"),
+            crate::i18n::tr("automation-at-dusk"),
+            crate::i18n::tr("automation-at-night"),
         ];
-        let kind_labels: Vec<&str> = kind_labels.iter().map(String::as_str).collect();
-        let kind_toggle = kit::segmented(
+        let kind_toggle = kit::dropdown(
             k,
             format!("schedule-kind-{index}"),
-            &kind_labels,
-            kind,
+            kind_labels.into_iter().map(Into::into).collect(),
+            Some(kind),
             false,
+            200.0,
             Self::h(cx, move |this, choice: usize, _, cx| {
                 this.edit(cx, move |settings| {
                     if let Some(entry) = settings.schedule.entries.get_mut(index) {
-                        entry.time = match choice {
-                            1 => ScheduleTime::Sunrise { offset: 0 },
-                            2 => ScheduleTime::Sunset { offset: 0 },
-                            _ => ScheduleTime::Clock { minutes: 8 * 60 },
-                        };
+                        entry.time = schedule_kind(choice, 0);
                     }
                 });
             }),
@@ -602,7 +690,9 @@ impl SettingsWindow {
                     });
                 }),
             ),
-            ScheduleTime::Sunrise { offset } | ScheduleTime::Sunset { offset } => {
+            ScheduleTime::Sunrise { offset }
+            | ScheduleTime::Sunset { offset }
+            | ScheduleTime::Solar { offset, .. } => {
                 let input = self.input(
                     format!("schedule-time-{index}-{kind}"),
                     &offset_text(offset),
@@ -614,11 +704,7 @@ impl SettingsWindow {
                             this.show_error(tr("automation-time-invalid"), cx);
                             return;
                         };
-                        let time = if kind == 1 {
-                            ScheduleTime::Sunrise { offset }
-                        } else {
-                            ScheduleTime::Sunset { offset }
-                        };
+                        let time = schedule_kind(kind, offset);
                         this.edit(cx, move |settings| {
                             if let Some(entry) = settings.schedule.entries.get_mut(index) {
                                 entry.time = time;
@@ -810,11 +896,15 @@ mod tests {
     fn parses_times_offsets_and_locations() {
         assert_eq!(parse_offset("+30"), Some(30));
         assert_eq!(parse_offset("\u{2212}15"), Some(-15));
-        assert_eq!(parse_offset("1000"), None);
+        assert_eq!(parse_offset("1441"), None);
+        assert_eq!(parse_offset("1440"), Some(1440));
         assert_eq!(parse_location("55.75, 37.62"), Some((55.75, 37.62)));
         assert_eq!(parse_location("91, 0"), None);
         assert_eq!(parse_location("55.75"), None);
-        assert_eq!(normalize_exe(r#""C:\Games\Game.EXE""#), "game.exe");
+        assert_eq!(
+            normalize_exe(r#""C:\Games\Game.EXE""#),
+            r"c:\games\game.exe"
+        );
         assert_eq!(normalize_exe("vlc"), "vlc.exe");
         assert_eq!(normalize_exe("  "), "");
         assert_eq!(offset_text(-15), "-15");

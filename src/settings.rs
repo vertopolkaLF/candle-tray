@@ -166,6 +166,9 @@ pub struct IdleDim {
     /// Stay bright while an app keeps the screen on (video, presentations)
     /// or runs full screen.
     pub respect_busy: bool,
+    /// None inherits respect_busy from older configurations.
+    pub exclude_fullscreen: Option<bool>,
+    pub exclude_media: Option<bool>,
 }
 
 impl Default for IdleDim {
@@ -175,8 +178,31 @@ impl Default for IdleDim {
             minutes: 5,
             level: 10,
             respect_busy: true,
+            exclude_fullscreen: None,
+            exclude_media: None,
         }
     }
+}
+
+impl IdleDim {
+    pub fn fullscreen_excluded(self) -> bool {
+        self.exclude_fullscreen.unwrap_or(self.respect_busy)
+    }
+    pub fn media_excluded(self) -> bool {
+        self.exclude_media.unwrap_or(self.respect_busy)
+    }
+}
+
+/// Solar events use SunCalc's standard elevations, matching Twinkle Tray.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SolarEvent {
+    Dawn,
+    SolarNoon,
+    GoldenHour,
+    SunsetStart,
+    Dusk,
+    Night,
 }
 
 /// When a schedule entry fires.
@@ -184,11 +210,21 @@ impl Default for IdleDim {
 #[serde(tag = "at", rename_all = "snake_case")]
 pub enum ScheduleTime {
     /// Minutes after local midnight.
-    Clock { minutes: u16 },
+    Clock {
+        minutes: u16,
+    },
     /// Minutes after (or before, when negative) local sunrise.
-    Sunrise { offset: i16 },
+    Sunrise {
+        offset: i16,
+    },
     /// Minutes after (or before, when negative) local sunset.
-    Sunset { offset: i16 },
+    Sunset {
+        offset: i16,
+    },
+    Solar {
+        event: SolarEvent,
+        offset: i16,
+    },
 }
 
 impl Default for ScheduleTime {
@@ -246,7 +282,7 @@ impl Default for AdaptiveBrightness {
 #[serde(tag = "when", rename_all = "snake_case")]
 pub enum TriggerCondition {
     /// An app comes to the foreground; leaving it restores the levels from
-    /// before. `exe` is the image file name, like `game.exe`.
+    /// before. `exe` is a basename (game.exe) or a complete executable path.
     App { exe: String },
     /// The computer switches to battery power.
     OnBattery,
@@ -275,7 +311,7 @@ impl ProfileTrigger {
         match &self.condition {
             TriggerCondition::App { exe: wanted } => {
                 let wanted = wanted.trim();
-                !wanted.is_empty() && wanted.eq_ignore_ascii_case(exe.trim())
+                crate::foreground::matches_executable(wanted, exe)
             }
             _ => false,
         }
@@ -336,10 +372,37 @@ impl From<TurnOffSetting> for TurnOffMode {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct VcpControl {
+    pub name: String,
+    pub enabled: bool,
+    pub min: u16,
+    pub max: u16,
+}
+
+impl Default for VcpControl {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            enabled: true,
+            min: 0,
+            max: 100,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MonitorSettings {
+    pub calibration: Vec<crate::levels::CalibrationPoint>,
+    pub sdr_primary: bool,
+    pub show_volume: bool,
+    pub last_sdr: Option<u8>,
+    pub vcp_controls: BTreeMap<String, VcpControl>,
     /// User-chosen display name; `None` shows the hardware name.
     pub name: Option<String>,
     pub hidden: bool,
+    /// Skip automatic startup/resume/reconnect restoration. Manual writes remain available.
+    pub skip_restore: bool,
     /// Preferred DDC/CI brightness VCP code; None uses automatic detection.
     /// Unanswered overrides fall back to the normal brightness candidates.
     pub brightness_vcp: Option<u8>,
@@ -367,8 +430,14 @@ pub struct MonitorSettings {
 impl Default for MonitorSettings {
     fn default() -> Self {
         Self {
+            calibration: Vec::new(),
+            sdr_primary: true,
+            show_volume: false,
+            last_sdr: None,
+            vcp_controls: BTreeMap::new(),
             name: None,
             hidden: false,
+            skip_restore: false,
             brightness_vcp: None,
             min: 0,
             max: 100,
@@ -383,6 +452,29 @@ impl Default for MonitorSettings {
 }
 
 impl MonitorSettings {
+    pub fn to_hardware(&self, value: u8) -> u8 {
+        crate::levels::calibrated_to_hardware(value, self.min, self.max, &self.calibration)
+    }
+
+    pub fn from_hardware(&self, value: u8) -> u8 {
+        crate::levels::calibrated_from_hardware(value, self.min, self.max, &self.calibration)
+    }
+
+    pub fn feature_codes(&self) -> Vec<u8> {
+        let mut codes: Vec<u8> = self
+            .vcp_controls
+            .iter()
+            .filter(|(_, feature)| feature.enabled)
+            .filter_map(|(code, _)| u8::from_str_radix(code, 16).ok())
+            .filter(|code| *code != 0)
+            .collect();
+        if self.show_volume {
+            codes.push(0x62);
+        }
+        codes.sort_unstable();
+        codes.dedup();
+        codes
+    }
     /// Key of an input source in [`Self::input_names`].
     pub fn input_key(value: u8) -> String {
         format!("{value:02X}")
@@ -411,6 +503,10 @@ impl MonitorSettings {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub invert_scroll: bool,
+    pub show_osd: bool,
+    /// MCCS power mode: 4 standby, 5 off, 6 compatibility (4 then 5).
+    pub ddc_power_off: u8,
     pub version: u32,
     pub language: Language,
     pub theme: Theme,
@@ -420,6 +516,8 @@ pub struct Settings {
     pub launch_at_startup: bool,
     /// Re-apply the last levels on startup, resume and display changes.
     pub restore_levels: bool,
+    pub pause_when_locked: bool,
+    pub hide_closed_lid: bool,
     /// One "All displays" slider instead of one per monitor.
     pub link_levels: bool,
     pub turn_off: TurnOffSetting,
@@ -436,6 +534,8 @@ pub struct Settings {
     #[serde(alias = "templates")]
     pub profiles: Vec<Profile>,
     pub shortcuts: Shortcuts,
+    /// Ordered action sequences, independent of the legacy shortcut slots.
+    pub action_shortcuts: Vec<crate::actions::Shortcut>,
     /// Percent the brightness shortcuts move every display by.
     pub shortcut_step: u8,
     /// Scrolling over the tray icon changes every visible display.
@@ -452,6 +552,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            invert_scroll: false,
+            show_osd: true,
+            ddc_power_off: 4,
             version: CURRENT_VERSION,
             language: Language::System,
             theme: Theme::Auto,
@@ -460,6 +563,8 @@ impl Default for Settings {
             tray_icon: TrayIcon::Fire,
             launch_at_startup: true,
             restore_levels: true,
+            pause_when_locked: false,
+            hide_closed_lid: false,
             link_levels: false,
             turn_off: TurnOffSetting::Windows,
             update_interval_ms: 100,
@@ -469,6 +574,7 @@ impl Default for Settings {
             twinkle_import_done: false,
             profiles: Vec::new(),
             shortcuts: Shortcuts::default(),
+            action_shortcuts: Vec::new(),
             shortcut_step: 10,
             tray_scroll: true,
             idle_dim: IdleDim::default(),
@@ -588,6 +694,12 @@ impl Settings {
             (Action::BrightnessDown, self.shortcuts.brightness_down),
             (Action::TurnOff, self.shortcuts.turn_off),
         ]);
+        hotkeys.extend(
+            self.action_shortcuts
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (Action::Sequence(i), s.hotkey)),
+        );
         hotkeys
     }
 
@@ -603,6 +715,12 @@ impl Settings {
             (Action::BrightnessDown, &mut self.shortcuts.brightness_down),
             (Action::TurnOff, &mut self.shortcuts.turn_off),
         ]);
+        hotkeys.extend(
+            self.action_shortcuts
+                .iter_mut()
+                .enumerate()
+                .map(|(i, s)| (Action::Sequence(i), &mut s.hotkey)),
+        );
         hotkeys
     }
 
@@ -659,7 +777,7 @@ impl Settings {
 
 type Subscriber = Arc<dyn Fn(&Settings) + Send + Sync>;
 enum WriteRequest {
-    Save(Settings),
+    Save(Box<Settings>),
     Flush(mpsc::Sender<std::result::Result<(), String>>),
 }
 struct StoreState {
@@ -697,7 +815,8 @@ impl SettingsStore {
             .spawn(move || {
                 let mut pending = None;
                 let mut last_error: Option<String> = None;
-                let persist = |pending: &mut Option<Settings>, last_error: &mut Option<String>| {
+                let persist = |pending: &mut Option<Box<Settings>>,
+                               last_error: &mut Option<String>| {
                     if let Some(settings) = pending.take() {
                         *last_error = settings.save(&path).err().map(|error| format!("{error:#}"));
                         if let Some(error) = last_error {
@@ -758,7 +877,7 @@ impl SettingsStore {
                 .sender
                 .as_ref()
                 .expect("writer")
-                .send(WriteRequest::Save(snapshot.clone()))
+                .send(WriteRequest::Save(Box::new(snapshot.clone())))
                 .is_err()
             {
                 crate::logger::error("Settings writer disconnected");
@@ -802,6 +921,103 @@ impl SettingsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calibration_features_and_behavior_round_trip_with_legacy_defaults() {
+        let legacy: Settings = toml::from_str("[monitors.desk]\nmin = 10\nmax = 90").unwrap();
+        assert!(legacy.monitor("desk").sdr_primary);
+        assert!(legacy.monitor("desk").calibration.is_empty());
+        assert!(!legacy.monitor("desk").show_volume);
+        let mut settings = legacy;
+        settings.invert_scroll = true;
+        settings.ddc_power_off = 6;
+        settings.show_osd = false;
+        let monitor = settings.monitors.get_mut("desk").unwrap();
+        monitor.calibration.push(crate::levels::CalibrationPoint {
+            slider: 50,
+            hardware: 30,
+        });
+        monitor.sdr_primary = false;
+        monitor.show_volume = true;
+        monitor.vcp_controls.insert(
+            "D6".into(),
+            VcpControl {
+                name: "Power".into(),
+                min: 1,
+                max: 5,
+                enabled: true,
+            },
+        );
+        assert_eq!(monitor.feature_codes(), vec![0x62, 0xd6]);
+        assert_eq!(monitor.to_hardware(50), 30);
+        assert_eq!(monitor.from_hardware(30), 50);
+        let decoded: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(decoded, settings);
+    }
+    #[test]
+    fn action_sequences_round_trip_without_replacing_legacy_slots() {
+        use crate::actions::{Action as MonitorAction, Control, Operation, Shortcut};
+        use crate::cli::Selector;
+        let hotkey = Hotkey {
+            ctrl: true,
+            alt: true,
+            shift: false,
+            win: false,
+            key: 0x41,
+        };
+        let mut settings = Settings::default();
+        settings.shortcuts.brightness_up = Some(hotkey);
+        settings.profiles.push(Profile {
+            hotkey: Some(hotkey),
+            levels: BTreeMap::from([(
+                "desk".into(),
+                ProfileLevels {
+                    brightness: None,
+                    sdr: Some(35),
+                    contrast: None,
+                },
+            )]),
+            ..Profile::default()
+        });
+        // Simulate a pre-stage-01 file, which has no action_shortcuts key.
+        let mut old = toml::Value::try_from(&settings).unwrap();
+        old.as_table_mut().unwrap().remove("action_shortcuts");
+        let migrated = Settings::from_toml(&toml::to_string(&old).unwrap()).unwrap();
+        assert_eq!(migrated, settings);
+        assert!(migrated.action_shortcuts.is_empty());
+        settings.action_shortcuts.push(Shortcut {
+            name: "Desk sequence".into(),
+            hotkey: Some(hotkey),
+            actions: vec![
+                MonitorAction::default(),
+                MonitorAction {
+                    selector: Selector::Id("desk".into()),
+                    control: Control::Vcp(0x12),
+                    operation: Operation::Cycle(vec![10, 20, 30]),
+                },
+                MonitorAction {
+                    selector: Selector::Position(2),
+                    control: Control::Power,
+                    operation: Operation::Set(1),
+                },
+            ],
+        });
+        let raw = toml::to_string_pretty(&settings).unwrap();
+        assert_eq!(Settings::from_toml(&raw).unwrap(), settings);
+        assert!(
+            settings
+                .hotkeys()
+                .contains(&(Action::Sequence(0), Some(hotkey)))
+        );
+        for (action, slot) in settings.hotkeys_mut() {
+            if action == Action::Sequence(0) {
+                *slot = None;
+            }
+        }
+        assert_eq!(settings.shortcuts.brightness_up, Some(hotkey));
+        assert_eq!(settings.profiles[0].hotkey, Some(hotkey));
+        assert_eq!(settings.action_shortcuts[0].hotkey, None);
+    }
     #[test]
     fn round_trip_and_atomic_replace() {
         let dir = tempfile::tempdir().unwrap();

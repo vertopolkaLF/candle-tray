@@ -136,6 +136,7 @@ pub fn pressed_now() -> Option<Hotkey> {
 pub enum Action {
     /// Apply the profile at this index.
     Profile(usize),
+    Sequence(usize),
     BrightnessUp,
     BrightnessDown,
     TurnOff,

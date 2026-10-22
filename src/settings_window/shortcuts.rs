@@ -18,7 +18,7 @@ impl SettingsWindow {
     pub(super) fn shortcuts_page(
         &mut self,
         k: &mut Kit,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let s = self.model.read(cx).settings.clone();
@@ -57,6 +57,16 @@ impl SettingsWindow {
                         this.edit(cx, move |settings| settings.shortcut_step = step);
                     }),
                 ),
+                kit::toggle_row(
+                    k,
+                    "show-osd",
+                    tr("features-osd"),
+                    Some(tr("features-osd-help")),
+                    s.show_osd,
+                    Self::h(cx, |this, value: bool, _, cx| {
+                        this.edit(cx, move |s| s.show_osd = value)
+                    }),
+                ),
             ]
         });
 
@@ -66,7 +76,7 @@ impl SettingsWindow {
             TurnOffSetting::Both => 2,
         };
         let turn_off = kit::card_of(k, |k| {
-            vec![
+            let mut rows = vec![
                 self.hotkey_row(
                     k,
                     Action::TurnOff,
@@ -96,11 +106,40 @@ impl SettingsWindow {
                         }),
                     ))
                     .render(k),
-            ]
+            ];
+            if s.turn_off != TurnOffSetting::Windows {
+                rows.push(kit::dropdown_row(
+                    k,
+                    "ddc-power-mode",
+                    tr("features-power"),
+                    Some(&tr("features-power-help")),
+                    vec![
+                        tr("features-power-standby"),
+                        tr("features-power-off"),
+                        tr("features-power-compat"),
+                    ],
+                    match s.ddc_power_off {
+                        5 => 1,
+                        6 => 2,
+                        _ => 0,
+                    },
+                    false,
+                    Self::h(cx, |this, index: usize, _, cx| {
+                        this.edit(cx, move |s| {
+                            s.ddc_power_off = match index {
+                                1 => 5,
+                                2 => 6,
+                                _ => 4,
+                            }
+                        })
+                    }),
+                ));
+            }
+            rows
         });
 
         let mouse = kit::card_of(k, |k| {
-            vec![kit::toggle_row(
+            let mut rows = vec![kit::toggle_row(
                 k,
                 "shortcuts-tray-scroll",
                 tr("shortcuts-tray-scroll"),
@@ -109,10 +148,23 @@ impl SettingsWindow {
                 Self::h(cx, |this, value: bool, _, cx| {
                     this.edit(cx, move |settings| settings.tray_scroll = value)
                 }),
-            )]
+            )];
+            if s.tray_scroll {
+                rows.push(kit::toggle_row(
+                    k,
+                    "invert-scroll",
+                    tr("features-invert-scroll"),
+                    None,
+                    s.invert_scroll,
+                    Self::h(cx, |this, value: bool, _, cx| {
+                        this.edit(cx, move |s| s.invert_scroll = value)
+                    }),
+                ));
+            }
+            rows
         });
 
-        vec![
+        let mut page = vec![
             kit::section_heading(k, tr("shortcuts-section-brightness")),
             brightness,
             kit::section_heading(k, tr("shortcuts-section-power")),
@@ -120,7 +172,9 @@ impl SettingsWindow {
             kit::section_heading(k, tr("shortcuts-section-mouse")),
             mouse,
             kit::caption(k, tr("shortcuts-profiles-note")),
-        ]
+        ];
+        page.extend(self.action_shortcuts_page(k, window, cx));
+        page
     }
 
     /// Records a shortcut: the button waits for the next combination, Esc
@@ -233,6 +287,7 @@ impl SettingsWindow {
 fn action_key(action: Action) -> String {
     match action {
         Action::Profile(index) => format!("profile-{index}"),
+        Action::Sequence(index) => format!("sequence-{index}"),
         Action::BrightnessUp => "brightness-up".into(),
         Action::BrightnessDown => "brightness-down".into(),
         Action::TurnOff => "turn-off".into(),

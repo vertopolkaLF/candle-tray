@@ -113,6 +113,7 @@ pub(super) fn enumerate() -> windows::core::Result<Vec<Target>> {
                 target: path.targetInfo.id,
                 source,
                 monitor: Monitor {
+                    vcp_values: Default::default(),
                     id,
                     model,
                     device_path,

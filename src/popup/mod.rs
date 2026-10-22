@@ -20,6 +20,7 @@ use std::sync::{LazyLock, Mutex};
 /// Commands posted to the GPUI thread. Every variant is cheap to send from
 /// any thread; the GPUI side wakes through its foreground executor.
 pub enum PopupCommand {
+    Osd(String, u8),
     Cli(crate::cli::Command),
     Show {
         anchor: Option<(i32, i32)>,
@@ -39,7 +40,7 @@ pub enum PopupCommand {
     Shortcut(crate::hotkey::Action),
     /// The wheel turned over the tray icon, in notches (up is positive).
     TrayScroll(i32),
-    /// First eligible foreground application, then changes of executable name.
+    /// First eligible foreground application, then changes of executable path.
     /// Fullscreen is a snapshot at that change, not a window resize event.
     Foreground {
         exe: String,
@@ -49,6 +50,9 @@ pub enum PopupCommand {
     PowerSource {
         on_battery: bool,
     },
+    SessionLocked(bool),
+    Suspended(bool),
+    LidClosed(bool),
     /// Smoothed ambient illuminance, in lux, from the light sensor service.
     AmbientLight {
         lux: f32,

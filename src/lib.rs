@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod app;
 pub mod automation;
 pub mod autostart;
@@ -14,6 +15,7 @@ pub mod monitors;
 pub mod notifications;
 pub mod popup;
 pub mod schedule;
+pub mod session;
 pub mod settings;
 pub mod settings_window;
 pub mod single_instance;

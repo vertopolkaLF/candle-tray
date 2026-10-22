@@ -1,7 +1,7 @@
 //! Tray-thread foreground and power-source watchers for profile triggers.
 //!
 //! Foreground events carry the first eligible application's lowercase executable
-//! name, then only name changes. Fullscreen is sampled on those events; resizing
+//! path, then only path changes. Fullscreen is sampled on those events; resizing
 //! a window or switching between windows of the same executable does not emit.
 //! Our process, taskbars and Explorer desktop surfaces are ignored without
 //! clearing the last application. Ordinary Explorer folder windows count normally.
@@ -48,6 +48,10 @@ impl Registration {
     /// and polling recovers naturally after sleep or a missed broadcast.
     pub fn poll(&mut self) {
         #[cfg(windows)]
+        if Instant::now() >= self.next_power {
+            native::sample_foreground();
+        }
+        #[cfg(windows)]
         if let Some((exe, fullscreen)) = native::take_foreground()
             && changed(&mut self.last_exe, exe.clone())
         {
@@ -86,6 +90,33 @@ pub fn on_battery_now() -> Option<bool> {
     None
 }
 
+/// Basename rules keep their historical meaning; rules containing a separator
+/// match a complete Windows executable path, without filesystem access.
+pub fn matches_executable(wanted: &str, actual: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .trim()
+            .trim_matches('"')
+            .replace('/', "\\")
+            .to_lowercase()
+    };
+    let wanted = normalize(wanted);
+    let actual = normalize(actual);
+    if wanted.is_empty() {
+        return false;
+    }
+    if wanted.contains('\\') {
+        wanted == actual
+    } else {
+        exe_name(&actual).is_some_and(|name| name == wanted)
+    }
+}
+
+#[cfg(windows)]
+pub fn fullscreen_now() -> bool {
+    native::foreground_fullscreen()
+}
+
 fn changed<T: PartialEq>(previous: &mut Option<T>, current: T) -> bool {
     if previous.as_ref() == Some(&current) {
         false
@@ -95,7 +126,6 @@ fn changed<T: PartialEq>(previous: &mut Option<T>, current: T) -> bool {
     }
 }
 
-#[cfg(any(windows, test))]
 fn exe_name(path: &str) -> Option<String> {
     let name = path.rsplit(['\\', '/']).next()?;
     (!name.is_empty()).then(|| name.to_lowercase())
@@ -187,6 +217,10 @@ mod native {
         PENDING.set(hwnd);
     }
 
+    pub(super) fn sample_foreground() {
+        PENDING.set(unsafe { GetForegroundWindow() });
+    }
+
     pub(super) fn take_foreground() -> Option<(String, bool)> {
         let hwnd = PENDING.replace(std::ptr::null_mut());
         if hwnd.is_null() || hwnd != unsafe { GetForegroundWindow() } {
@@ -228,11 +262,29 @@ mod native {
         if success == 0 {
             return None;
         }
-        let exe = super::exe_name(&String::from_utf16_lossy(&path[..len as usize]))?;
+        let exe = String::from_utf16_lossy(&path[..len as usize]).to_lowercase();
         Some((exe, fullscreen(hwnd)))
     }
 
+    pub(super) fn foreground_fullscreen() -> bool {
+        let hwnd = unsafe { GetForegroundWindow() };
+        let mut class = [0u16; 64];
+        let len = unsafe { GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32) };
+        if len > 0
+            && matches!(
+                String::from_utf16_lossy(&class[..len as usize]).as_str(),
+                "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+            )
+        {
+            return false;
+        }
+        fullscreen(hwnd)
+    }
+
     fn fullscreen(hwnd: HWND) -> bool {
+        if hwnd.is_null() {
+            return false;
+        }
         if unsafe { IsIconic(hwnd) } != 0 {
             return false;
         }
@@ -275,6 +327,22 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matches_paths_without_conflating_same_named_executables() {
+        assert!(matches_executable("GAME.EXE", r"C:\Games\Game.exe"));
+        assert!(matches_executable(
+            r#" "C:/Games/Game.exe" "#,
+            r"c:\games\GAME.EXE"
+        ));
+        assert!(!matches_executable(
+            r"C:\Games\game.exe",
+            r"D:\Tools\game.exe"
+        ));
+        assert!(!matches_executable(r"C:\Games\game.exe", "game.exe"));
+        assert!(!matches_executable(" ", r"C:\Games\game.exe"));
+        assert!(!matches_executable("game.exe", r"C:\Games\mygame.exe"));
+    }
 
     #[test]
     fn extracts_lowercase_basename() {

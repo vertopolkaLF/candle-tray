@@ -446,6 +446,21 @@ impl SettingsWindow {
                 }),
             );
 
+            let restore_id = id.clone();
+            let restore = kit::toggle_row(
+                k,
+                format!("restore-{id}"),
+                tr("monitors-auto-restore"),
+                Some(tr("monitors-auto-restore-description")),
+                !row.settings.skip_restore,
+                Self::h(cx, move |this, value: bool, _, cx| {
+                    let id = restore_id.clone();
+                    this.edit(cx, move |s| {
+                        s.monitors.entry(id).or_default().skip_restore = !value
+                    });
+                }),
+            );
+
             // Only displays that answer VCP 0x12 get the option.
             let contrast =
                 (row.monitor.contrast.is_some() || row.settings.show_contrast).then(|| {
@@ -734,19 +749,24 @@ impl SettingsWindow {
                 )
             });
 
+            let slider_rows = self.monitor_slider_rows(&row, k, window, cx);
+            let ddc_rows = self.monitor_ddc_rows(&row, k, window, cx);
             let card = kit::card_of(k, |k| {
                 let mut rows = vec![
                     Row::new(format!("name-row-{id}"), tr("monitors-rename"))
                         .trailing(name_field)
                         .render(k),
                     hidden,
+                    restore,
                     min_row,
                     max_row,
                 ];
+                rows.extend(slider_rows);
+                rows.extend(vcp_row);
                 rows.extend(contrast);
                 rows.extend(inputs);
                 rows.extend(input_rows);
-                rows.extend(vcp_row);
+                rows.extend(ddc_rows);
                 rows.push(
                     Row::new(format!("order-row-{id}"), tr("monitors-order"))
                         .trailing(order)

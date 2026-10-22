@@ -25,6 +25,16 @@ fn run() -> Result<()> {
             })
             .collect::<Result<Vec<_>>>()?,
     )?;
+    if command == Some(candle_tray::cli::Command::List) {
+        #[cfg(windows)]
+        unsafe {
+            windows_sys::Win32::System::Console::AttachConsole(
+                windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+        println!("{}", candle_tray::cli::list_displays()?);
+        return Ok(());
+    }
     let Some(instance) = single_instance::acquire(command.as_ref())? else {
         return Ok(());
     };

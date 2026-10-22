@@ -48,6 +48,7 @@ impl Throttle {
 enum Work {
     Probe(Box<Target>, Arc<Vec<Target>>, Option<u8>),
     Capabilities,
+    Features(Vec<u8>),
     /// Re-read levels through the open handles, keeping the last known value
     /// of any read that fails.
     Read,
@@ -59,11 +60,13 @@ enum Work {
     Hdr(bool),
     /// VCP 0x60: switch to this input source.
     Input(u8),
+    Action(crate::actions::Write, Instant),
 }
 struct Reply {
     id: String,
     operation: u64,
     monitor: Monitor,
+    applied: Option<(Option<u8>, Option<u8>, Instant, crate::actions::Control)>,
 }
 struct Request {
     operation: u64,
@@ -74,10 +77,12 @@ struct Slot {
     sender: Sender<Request>,
     busy: Option<(u64, Instant, Duration)>,
     throttle: Throttle,
+    ordered: std::collections::VecDeque<Work>,
     refresh: Option<(Target, Arc<Vec<Target>>)>,
     /// Last enumeration data, retained for a single-display re-probe.
     discovery: Option<(Target, Arc<Vec<Target>>)>,
     capabilities: bool,
+    features: Option<Vec<u8>>,
     /// Requested DDC power state, not yet written.
     power: Option<bool>,
     /// Requested HDR state, not yet written.
@@ -90,6 +95,26 @@ struct Slot {
     active: bool,
 }
 impl Slot {
+    fn enqueue_action(&mut self, write: crate::actions::Write, issued: Instant) {
+        // Drain earlier slider/control writes before the
+        // sequence. Ordered actions themselves never coalesce.
+        for level in [Level::Brightness, Level::Sdr, Level::Contrast] {
+            if let Some(value) = self.throttle.pending.remove(&level) {
+                self.ordered.push_back(Work::Write(level, value));
+            }
+        }
+        if let Some(on) = self.power.take() {
+            self.ordered.push_back(Work::Power(on));
+        }
+        if let Some(on) = self.hdr.take() {
+            self.ordered.push_back(Work::Hdr(on));
+        }
+        if let Some(value) = self.input.take() {
+            self.ordered.push_back(Work::Input(value));
+        }
+        let work = Work::Action(write, issued);
+        self.ordered.push_back(work);
+    }
     fn reprobe(&mut self) {
         self.refresh = self.discovery.clone();
         self.read = false;
@@ -100,7 +125,9 @@ impl Slot {
     fn idle(&self) -> bool {
         self.busy.is_none()
             && self.throttle.pending.is_empty()
+            && self.ordered.is_empty()
             && self.refresh.is_none()
+            && self.features.is_none()
             && !self.capabilities
             && self.power.is_none()
             && self.hdr.is_none()
@@ -142,6 +169,12 @@ struct Handles {
     max: u32,
     /// DDC maximum of the contrast code.
     contrast_max: u32,
+    /// Exact normalized value retained between ordered actions; hardware
+    /// quantization must not drift a cycle or repeated one-percent offsets.
+    slider: Option<(u8, u8, u8)>,
+    power_mode: u8,
+    features: Vec<u8>,
+    slider_curve: Vec<crate::levels::CalibrationPoint>,
 }
 /// Scale a DDC reading to percent.
 fn percent(current: u32, max: u32) -> u8 {
@@ -181,9 +214,221 @@ fn set_brightness_vcp(
     }
 }
 
+/// All callers pass hardware percent here. Normalization belongs to the
+/// action resolver (or, for the popup/automation, their existing callers).
+fn write_level(h: &mut Handles, level: Level, value: u8) -> bool {
+    let scaled = |max: u32| (u64::from(value) * u64::from(max) / 100) as u32;
+    let ok = match level {
+        Level::Sdr => h.target.monitor.sdr.is_some() && hdr::set(&h.target, value),
+        Level::Contrast => {
+            h.target.monitor.contrast.is_some()
+                && h.ddc
+                    .as_ref()
+                    .is_some_and(|d| d.set(CONTRAST, scaled(h.contrast_max)))
+        }
+        Level::Brightness => match h.target.monitor.backend {
+            BrightnessBackend::Ddc { vcp } => {
+                h.ddc.as_ref().is_some_and(|d| d.set(vcp, scaled(h.max)))
+            }
+            BrightnessBackend::Wmi => h
+                .wmi
+                .as_ref()
+                .is_some_and(|w| w.set(&h.target.monitor.id, value).is_ok()),
+            BrightnessBackend::Unsupported => false,
+        },
+    };
+    if ok {
+        match level {
+            Level::Brightness => h.target.monitor.brightness = Some(value),
+            Level::Sdr => h.target.monitor.sdr = Some(SdrLevel { percent: value }),
+            Level::Contrast => h.target.monitor.contrast = Some(value),
+        }
+    }
+    ok
+}
+
+fn execute_action(
+    h: &mut Handles,
+    write: &crate::actions::Write,
+) -> anyhow::Result<(Option<u8>, Option<u8>)> {
+    use crate::actions::{Control, Operation};
+    use crate::levels;
+    crate::actions::Action {
+        selector: crate::cli::Selector::All,
+        control: write.control.clone(),
+        operation: write.operation.clone(),
+    }
+    .validate()?;
+    let monitor = &h.target.monitor;
+    anyhow::ensure!(
+        !monitor.powered_off || write.control == Control::Power,
+        "display is powered off"
+    );
+    match write.control {
+        Control::Brightness | Control::Sdr | Control::Contrast => {
+            let level = match write.control {
+                Control::Sdr => Level::Sdr,
+                Control::Contrast => Level::Contrast,
+                _ if monitor.sdr.is_some()
+                    && (write.sdr_primary || monitor.brightness.is_none()) =>
+                {
+                    Level::Sdr
+                }
+                _ => Level::Brightness,
+            };
+            let (value, hardware) = if level == Level::Brightness {
+                let previous = h.slider.filter(|_| h.slider_curve == write.calibration);
+                let current = previous
+                    .filter(|(min, max, _)| *min == write.min && *max == write.max)
+                    .map(|(_, _, value)| value)
+                    .or_else(|| {
+                        monitor.brightness.map(|value| {
+                            levels::calibrated_from_hardware(
+                                value,
+                                write.min,
+                                write.max,
+                                &write.calibration,
+                            )
+                        })
+                    });
+                let value = write
+                    .operation
+                    .evaluate(current.map(i32::from), 100, None)? as u8;
+                (
+                    value,
+                    levels::calibrated_to_hardware(value, write.min, write.max, &write.calibration),
+                )
+            } else {
+                let current = if level == Level::Sdr {
+                    monitor.sdr.map(|v| v.percent)
+                } else {
+                    monitor.contrast
+                };
+                anyhow::ensure!(current.is_some(), "control unavailable");
+                let value = write
+                    .operation
+                    .evaluate(current.map(i32::from), 100, None)? as u8;
+                (value, value)
+            };
+            anyhow::ensure!(write_level(h, level, hardware), "level write failed");
+            if level == Level::Brightness {
+                h.slider = Some((write.min, write.max, value));
+                h.slider_curve = write.calibration.clone();
+            }
+            Ok(if level == Level::Contrast {
+                (None, Some(value))
+            } else if level == Level::Sdr
+                && !write.sdr_primary
+                && h.target.monitor.brightness.is_some()
+            {
+                (None, None)
+            } else {
+                (Some(value), None)
+            })
+        }
+        _ => {
+            let code = match write.control {
+                Control::Input => INPUT,
+                Control::Power => 0xd6,
+                Control::Vcp(code) => code,
+                _ => unreachable!(),
+            };
+            // Re-probing may have changed support since the UI selected this
+            // display. Never carry a stale capability assumption to a write.
+            anyhow::ensure!(
+                match write.control {
+                    Control::Input => h.ddc.is_some(),
+                    Control::Power => h.ddc.is_some(),
+                    Control::Vcp(_) => h.ddc.is_some(),
+                    _ => false,
+                },
+                "control no longer supported"
+            );
+            let ddc = h
+                .ddc
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("DDC unavailable"))?;
+            let max = if code == INPUT {
+                255
+            } else if code == 0xd6 {
+                5
+            } else {
+                65535
+            };
+            write.operation.validate(max, write.allowed.as_deref())?;
+            let current = match write.operation {
+                Operation::Set(_) => None,
+                _ if code == INPUT => monitor.input.map(i32::from),
+                // Some monitors advertise power writes but do not answer reads.
+                _ if code == 0xd6 => Some(i32::from(h.power_mode)),
+                _ => {
+                    let current = ddc
+                        .read_raw(code)
+                        .ok_or_else(|| anyhow::anyhow!("VCP read failed"))?
+                        .0;
+                    anyhow::ensure!(current <= 65535, "invalid VCP reading");
+                    Some(current as i32)
+                }
+            };
+            let value = write
+                .operation
+                .evaluate(current, max, write.allowed.as_deref())?;
+            anyhow::ensure!(ddc.set(code, value as u32), "VCP write not acknowledged");
+            if code == INPUT {
+                h.target.monitor.input = Some(value as u8);
+            }
+            if code == 0xd6 {
+                h.target.monitor.powered_off = value != 1;
+                h.power_mode = value as u8;
+            }
+            if let Some((_, maximum)) = h.target.monitor.vcp_values.get(&code).copied() {
+                h.target
+                    .monitor
+                    .vcp_values
+                    .insert(code, (value as u32, maximum));
+            }
+            // Refresh the typed state when raw VCP touched the same hardware
+            // control, so the next relative action observes this write.
+            let mut remembered = (None, None);
+            if matches!(h.target.monitor.backend, BrightnessBackend::Ddc { vcp } if vcp == code) {
+                if let Some((current, maximum)) = ddc.read(code) {
+                    h.max = maximum;
+                    let hardware = percent(current, maximum);
+                    h.target.monitor.brightness = Some(hardware);
+                    h.slider = None;
+                    remembered.0 =
+                        (h.target.monitor.sdr.is_none() || !write.sdr_primary).then(|| {
+                            levels::calibrated_from_hardware(
+                                hardware,
+                                write.min,
+                                write.max,
+                                &write.calibration,
+                            )
+                        });
+                } else {
+                    h.target.monitor.brightness = None;
+                    h.slider = None;
+                }
+            }
+            if code == CONTRAST {
+                if let Some((current, maximum)) = ddc.read(code) {
+                    h.contrast_max = maximum;
+                    let value = percent(current, maximum);
+                    h.target.monitor.contrast = Some(value);
+                    remembered.1 = Some(value);
+                } else {
+                    h.target.monitor.contrast = None;
+                }
+            }
+            Ok(remembered)
+        }
+    }
+}
+
 fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
     let mut state: Option<Handles> = None;
     while let Ok(request) = receiver.recv() {
+        let mut applied = None;
         match request.work {
             Work::Probe(target, targets, brightness_vcp) => {
                 let mut target = *target;
@@ -237,7 +482,17 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                     wmi,
                     max,
                     contrast_max,
+                    slider: None,
+                    power_mode: if was_off { 4 } else { 1 },
+                    features: Vec::new(),
+                    slider_curve: Vec::new(),
                 });
+            }
+            Work::Features(codes) => {
+                if let Some(h) = &mut state {
+                    h.features = codes;
+                    read_features(h);
+                }
             }
             Work::Capabilities => {
                 if let Some(h) = &mut state
@@ -253,7 +508,7 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                         .collect();
                     // The low byte is the source; some displays set flags above it.
                     monitor.input = (!monitor.inputs.is_empty())
-                        .then(|| ddc.read(INPUT))
+                        .then(|| ddc.read_raw(INPUT))
                         .flatten()
                         .map(|(current, _)| (current & 0xff) as u8)
                         .filter(|value| *value != 0);
@@ -261,6 +516,7 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
             }
             Work::Read => {
                 if let Some(h) = &mut state {
+                    read_features(h);
                     let brightness = match h.target.monitor.backend {
                         BrightnessBackend::Ddc { vcp } => h
                             .ddc
@@ -276,8 +532,15 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                             .and_then(|w| w.brightness(&h.target.monitor.id)),
                         BrightnessBackend::Unsupported => None,
                     };
-                    if brightness.is_some() {
-                        h.target.monitor.brightness = brightness;
+                    if let Some(hardware) = brightness {
+                        if h.slider.is_some_and(|(min, max, value)| {
+                            crate::levels::calibrated_to_hardware(value, min, max, &h.slider_curve)
+                                .abs_diff(hardware)
+                                > 1
+                        }) {
+                            h.slider = None;
+                        }
+                        h.target.monitor.brightness = Some(hardware);
                     }
                     if h.target.monitor.contrast.is_some()
                         && let Some((current, maximum)) =
@@ -291,11 +554,25 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                     }
                 }
             }
+            Work::Action(write, issued) => {
+                if let Some(h) = &mut state {
+                    match execute_action(h, &write) {
+                        Ok((brightness, contrast)) => {
+                            applied = Some((brightness, contrast, issued, write.control))
+                        }
+                        Err(error) => log(format!(
+                            "Action on {} skipped: {error:#}",
+                            h.target.monitor.id
+                        )),
+                    }
+                }
+            }
             Work::Power(on) => {
                 if let Some(h) = &mut state {
                     match &h.ddc {
                         Some(ddc) if ddc.set(0xd6, if on { 1 } else { 4 }) => {
                             h.target.monitor.powered_off = !on;
+                            h.power_mode = if on { 1 } else { 4 };
                         }
                         _ => log(format!("DDC power failed: {}", h.target.monitor.id)),
                     }
@@ -327,35 +604,8 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
             }
             Work::Write(level, percent) => {
                 if let Some(h) = &mut state {
-                    let scaled = |max: u32| (u64::from(percent) * u64::from(max) / 100) as u32;
-                    let ok = match level {
-                        Level::Sdr => {
-                            h.target.monitor.sdr.is_some() && hdr::set(&h.target, percent)
-                        }
-                        Level::Contrast => {
-                            h.target.monitor.contrast.is_some()
-                                && h.ddc
-                                    .as_ref()
-                                    .is_some_and(|d| d.set(CONTRAST, scaled(h.contrast_max)))
-                        }
-                        Level::Brightness => match h.target.monitor.backend {
-                            BrightnessBackend::Ddc { vcp } => {
-                                h.ddc.as_ref().is_some_and(|d| d.set(vcp, scaled(h.max)))
-                            }
-                            BrightnessBackend::Wmi => h
-                                .wmi
-                                .as_ref()
-                                .is_some_and(|w| w.set(&h.target.monitor.id, percent).is_ok()),
-                            BrightnessBackend::Unsupported => false,
-                        },
-                    };
-                    if ok {
-                        match level {
-                            Level::Brightness => h.target.monitor.brightness = Some(percent),
-                            Level::Sdr => h.target.monitor.sdr = Some(SdrLevel { percent }),
-                            Level::Contrast => h.target.monitor.contrast = Some(percent),
-                        }
-                    } else {
+                    h.slider = None;
+                    if !write_level(h, level, percent) {
                         if level == Level::Brightness {
                             h.target.monitor.brightness = None;
                         }
@@ -373,6 +623,7 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                     id: h.target.monitor.id.clone(),
                     operation: request.operation,
                     monitor: h.target.monitor.clone(),
+                    applied,
                 })
                 .is_err()
         {
@@ -395,6 +646,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
         .ok();
     let (replies, completed) = mpsc::channel::<Reply>();
     let mut slots = HashMap::<String, Slot>::new();
+    let mut feature_codes: HashMap<MonitorId, Vec<u8>> = HashMap::new();
     let mut brightness_vcps = HashMap::<MonitorId, u8>::new();
     let mut sequence = 0u64;
     let mut throttle = Duration::from_millis(100);
@@ -440,6 +692,22 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 Ok(Command::Shutdown) | Err(mpsc::TryRecvError::Disconnected) => return,
                 Err(mpsc::TryRecvError::Empty) => break,
                 Ok(Command::Refresh) => refresh = Some(SnapshotReason::Requested),
+                Ok(Command::ConfigureFeatures { id, codes }) => {
+                    feature_codes.insert(id.clone(), codes.clone());
+                    if let Some(slot) = slots.get_mut(&id) {
+                        slot.features = Some(codes);
+                    }
+                }
+                Ok(Command::Execute(writes, issued)) => {
+                    for (id, write) in writes {
+                        if let Some(slot) = slots
+                            .get_mut(&id)
+                            .filter(|s| s.active && !s.monitor.unresponsive)
+                        {
+                            slot.enqueue_action(write, issued);
+                        }
+                    }
+                }
                 Ok(Command::ReadLevels) => {
                     // A display in DPM off may not answer; a pending probe
                     // reads levels anyway.
@@ -451,6 +719,15 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                     }
                 }
                 Ok(Command::SetThrottle(value)) => throttle = value,
+                Ok(Command::DiscardPendingLevels) => {
+                    for slot in slots.values_mut() {
+                        slot.throttle.pending.clear();
+                        slot.ordered.clear();
+                        slot.power = None;
+                        slot.hdr = None;
+                        slot.input = None;
+                    }
+                }
                 Ok(Command::SetBrightnessVcp { id, vcp }) => {
                     set_brightness_vcp(&mut brightness_vcps, &mut slots, id, vcp);
                 }
@@ -537,7 +814,17 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 slot.awaiting_probe = false;
             }
             if slot.active {
-                callback(Event::Updated(slot.monitor.clone()));
+                if let Some((brightness, contrast, issued, control)) = reply.applied {
+                    callback(Event::ActionApplied {
+                        control,
+                        issued,
+                        monitor: slot.monitor.clone(),
+                        brightness,
+                        contrast,
+                    });
+                } else {
+                    callback(Event::Updated(slot.monitor.clone()));
+                }
             }
         }
         if let Some(reason) = refresh.take() {
@@ -558,6 +845,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                             slot.refresh = None;
                             slot.throttle.pending.clear();
                             slot.capabilities = false;
+                            slot.ordered.clear();
                             slot.power = None;
                             slot.hdr = None;
                             slot.input = None;
@@ -577,9 +865,11 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                                 sender,
                                 busy: None,
                                 throttle: Throttle::default(),
+                                ordered: Default::default(),
                                 refresh: None,
                                 discovery: None,
                                 capabilities: false,
+                                features: feature_codes.get(&target.monitor.id).cloned(),
                                 power: None,
                                 hdr: None,
                                 input: None,
@@ -590,6 +880,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                         });
                         slot.discovery = Some((target.clone(), targets.clone()));
                         slot.reprobe();
+                        slot.features = feature_codes.get(&target.monitor.id).cloned();
                     }
                     snapshot = Some(
                         targets
@@ -651,6 +942,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 continue;
             }
             let (work, timeout) = if let Some((target, targets)) = slot.refresh.take() {
+                slot.features = feature_codes.get(&slot.monitor.id).cloned();
                 (
                     Work::Probe(
                         Box::new(target),
@@ -659,6 +951,8 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                     ),
                     Duration::from_secs(15),
                 )
+            } else if let Some(work) = slot.ordered.pop_front() {
+                (work, Duration::from_secs(5))
             } else if let Some((level, p)) = slot.throttle.take(epoch.elapsed(), throttle) {
                 (Work::Write(level, p), Duration::from_secs(3))
             } else if let Some(on) = slot.power.take() {
@@ -674,6 +968,8 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
             } else if slot.capabilities {
                 slot.capabilities = false;
                 (Work::Capabilities, Duration::from_secs(15))
+            } else if let Some(codes) = slot.features.take() {
+                (Work::Features(codes), Duration::from_secs(10))
             } else {
                 continue;
             };
@@ -711,6 +1007,20 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
         }
     }
 }
+
+fn read_features(h: &mut Handles) {
+    h.target
+        .monitor
+        .vcp_values
+        .retain(|code, _| h.features.contains(code));
+    if let Some(ddc) = &h.ddc {
+        for code in &h.features {
+            if let Some(value) = ddc.read_raw(*code) {
+                h.target.monitor.vcp_values.insert(*code, value);
+            }
+        }
+    }
+}
 fn sorted(slots: &HashMap<String, Slot>, ids: Option<&Vec<String>>) -> Vec<Monitor> {
     let mut monitors: Vec<_> = slots
         .iter()
@@ -723,10 +1033,113 @@ fn sorted(slots: &HashMap<String, Slot>, ids: Option<&Vec<String>>) -> Vec<Monit
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn action_dispatch_preserves_prior_slider_write_and_sequence_order() {
+        use crate::actions::{Control, Operation, Write};
+        let mut slot = slot();
+        slot.throttle.set(Level::Brightness, 30);
+        slot.throttle.set(Level::Brightness, 40);
+        let write = |operation| Write {
+            calibration: Vec::new(),
+            sdr_primary: true,
+            control: Control::Brightness,
+            operation,
+            min: 20,
+            max: 80,
+            allowed: None,
+        };
+        slot.enqueue_action(write(Operation::Set(20)), Instant::now());
+        slot.enqueue_action(write(Operation::Offset(5)), Instant::now());
+        slot.enqueue_action(write(Operation::Cycle(vec![25, 50])), Instant::now());
+        assert!(slot.throttle.pending.is_empty());
+        assert!(matches!(
+            slot.ordered.pop_front(),
+            Some(Work::Write(Level::Brightness, 40))
+        ));
+        assert!(matches!(
+            slot.ordered.pop_front(),
+            Some(Work::Action(
+                Write {
+                    operation: Operation::Set(20),
+                    ..
+                },
+                _
+            ))
+        ));
+        assert!(matches!(
+            slot.ordered.pop_front(),
+            Some(Work::Action(
+                Write {
+                    operation: Operation::Offset(5),
+                    ..
+                },
+                _
+            ))
+        ));
+        assert!(
+            matches!(slot.ordered.pop_front(), Some(Work::Action(Write { operation: Operation::Cycle(v), .. }, _)) if v == vec![25, 50])
+        );
+        assert!(slot.ordered.is_empty());
+    }
+
+    #[test]
+    fn rejected_or_failed_action_does_not_change_worker_state() {
+        use crate::actions::{Control, Operation, Write};
+        let mut monitor = slot().monitor;
+        monitor.brightness = Some(50);
+        let (target, _) = discovery(monitor.clone());
+        let mut h = Handles {
+            target,
+            ddc: None,
+            wmi: None,
+            max: 100,
+            contrast_max: 100,
+            slider: Some((20, 80, 50)),
+            power_mode: 1,
+            features: Vec::new(),
+            slider_curve: Vec::new(),
+        };
+        for operation in [Operation::Cycle(vec![50, 101]), Operation::Set(30)] {
+            let result = execute_action(
+                &mut h,
+                &Write {
+                    calibration: Vec::new(),
+                    sdr_primary: true,
+                    control: Control::Brightness,
+                    operation,
+                    min: 20,
+                    max: 80,
+                    allowed: None,
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(h.target.monitor, monitor);
+            assert_eq!(h.slider, Some((20, 80, 50)));
+        }
+        h.target.monitor.powered_off = true;
+        assert!(
+            execute_action(
+                &mut h,
+                &Write {
+                    calibration: Vec::new(),
+                    sdr_primary: true,
+                    control: Control::Brightness,
+                    operation: Operation::Set(10),
+                    min: 0,
+                    max: 100,
+                    allowed: None
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(h.target.monitor.brightness, Some(50));
+    }
+
     fn slot() -> Slot {
         let (sender, _) = mpsc::channel();
         Slot {
             monitor: Monitor {
+                vcp_values: Default::default(),
                 id: "TEST".into(),
                 model: "TEST".into(),
                 device_path: String::new(),
@@ -749,9 +1162,11 @@ mod tests {
             sender,
             busy: None,
             throttle: Throttle::default(),
+            ordered: Default::default(),
             refresh: None,
             discovery: None,
             capabilities: false,
+            features: None,
             power: None,
             hdr: None,
             input: None,

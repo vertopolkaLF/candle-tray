@@ -4,12 +4,14 @@
 //! Minibar's; the window and its pages are Candle Tray's own.
 
 mod about;
+mod action_shortcuts;
 mod automation;
 mod backdrop;
 #[allow(dead_code)]
 pub(crate) mod input;
 #[allow(dead_code)]
 pub(crate) mod kit;
+mod monitor_features;
 mod pages;
 mod profiles;
 mod shortcuts;

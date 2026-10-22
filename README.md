@@ -46,8 +46,8 @@ Scrolling over the tray icon changes brightness too.
 
 ### Per-display settings
 
-Rename or hide displays, map the slider to a hardware minimum and maximum, give inputs your
-own names, and set a vendor brightness VCP code for displays that need one. Every setting
+Rename or hide displays, map the slider through a calibrated brightness curve with a hardware minimum and maximum, give inputs your
+own names, and set a vendor brightness VCP code for displays that need one. Monitor volume (VCP 0x62) and additional hexadecimal VCP controls can also be enabled per display. Calibration accepts increasing slider:hardware points, such as `25:10, 50:30, 75:60`. Empty calibration uses a linear min/max range. Every setting
 applies live.
 
 <p align="center">
@@ -66,8 +66,9 @@ an app is in front, or when the computer switches between battery and mains powe
 
 ### Automation
 
-- A time-of-day schedule with clock times, sunrise and sunset (with location detection) and
-  smooth transitions.
+- A time-of-day schedule with clock times, dawn, sunrise, solar noon, golden hour, sunset start, sunset, dusk and night (with location detection), offsets and smooth transitions.
+- Independent media and fullscreen idle exclusions, optional pause while the session is locked, and a manual override with a Resume automation control.
+- Full-path or executable-name foreground matching, optional closed-lid panel hiding and per-display restoration exclusions.
 - Dimming after a period without input.
 - Adaptive brightness from an ambient light sensor.
 
@@ -132,6 +133,9 @@ candle-tray.exe --profile "Night"
 candle-tray.exe --off
 candle-tray.exe --input HDMI1 --display <selector>
 candle-tray.exe --show
+candle-tray.exe --List
+candle-tray.exe --VCP=0x62:35 --MonitorNum=1 --Overlay
+candle-tray.exe --Set=50 --Panel
 ```
 
 The selector defaults to `all`: all visible displays. It can also be a 1-based
@@ -148,18 +152,48 @@ Profiles accept a case-insensitive full name or a 1-based profile number.
 Duplicate names are rejected. `--off` uses the configured power-off method.
 Input switching requires an explicit selector and accepts `HDMI1`, `HDMI2`,
 `DP1`, `DP2`, `USB-C`, or a nonzero hexadecimal VCP 0x60 value such as `0x11`.
-The display must support DDC/CI input switching; raw values are forwarded even
-when absent from its advertised input list.
+The display must have a DDC/CI connection. Explicit CLI/action input writes accept any nonzero byte, including vendor values missing from its advertised input list. Input chips in the popup still respect the configured visible sources.
 
-Twinkle Tray spellings `--MonitorNum=2`, `--MonitorID=<exact-id>`, `--All`,
-`--Set=50`, and `--Offset=-10` are also accepted, with either value form.
+Settings → Shortcuts also supports named action shortcuts. Each shortcut stores
+an ordered sequence with its own display selection, control and operation per
+action. Controls are shared-slider brightness, explicit SDR white level,
+contrast, raw VCP, input source and DDC power. Operations are set, signed offset
+and cycle through unique values. Cycles choose the next value after the current
+value, wrap at the end, and start at the first value when the current value is
+not listed. Failed/invalid actions do not advance a cursor or overwrite saved
+levels. Values are evaluated by the monitor worker after earlier actions finish.
+Each display preserves action order; different displays execute independently.
+Hidden/unresponsive displays and unsupported controls are skipped; powered-off
+displays accept only power actions until switched on. Explicit raw VCP actions can address unadvertised codes on DDC displays. Raw 0x60/0xD6 use the typed input/power
+validation rules. Raw values are 0–65535, input values are nonzero
+bytes, and power values are 1 (on), 2 (standby), 3 (suspend), 4 (DPM off), 5 (off).
+
+The same sequences can be sent through `--actions '<JSON array>'`. Each entry
+has `selector`, `control` and `operation`; selectors are `"All"`, `{"Id":"id"}`,
+`{"Position":1}` or `{"NameOrId":"Desk"}`. Controls are `"Brightness"`, `"Sdr"`,
+`"Contrast"`, `{"Vcp":18}`, `"Input"` or `"Power"`. Operations are `{"Set":50}`,
+`{"Offset":-5}` or `{"Cycle":[25,50,100]}`. For example, in PowerShell:
+
+```powershell
+candle-tray.exe --actions '[{"selector":"All","control":"Brightness","operation":{"Cycle":[25,50,100]}}]'
+```
+
+Existing shortcut slots, profile shortcuts, CLI spellings and configuration
+files remain supported. Percentage actions use the normalized slider scale;
+direct monitor setters still take hardware percentages. Successful worker
+acknowledgements update remembered levels without requiring a restart.
+
+Twinkle Tray spellings `--MonitorNum=2`, `--MonitorID=<id-or-substring>`, `--All`,
+`--Set=50`, and `--Offset=-10` are also accepted, with either value form. `--MonitorID` prefers an exact ID, then selects case-insensitive ID substring matches.
 For example: `candle-tray.exe --MonitorNum 2 --Offset -10`.
 
 Commands are sent to the running instance using a JSON `WM_COPYDATA` payload;
-they do not open the popup unless `--show` is used. A plain second launch still
+they do not open the popup unless `--show` or `--Panel` is used. `--Overlay` requests a brief non-activating OSD after a successful level action. The level indicator for shortcuts and tray scrolling is under Shortcuts > Brightness; scroll inversion is under Shortcuts > Mouse. DDC power values (4, 5, or 4 then 5) are configured under Shortcuts > Power and appear only when DDC/CI or Both is selected. A plain second launch still
 opens the popup. If Candle Tray is not running, it starts normally and queues
 hardware commands until the first monitor snapshot. Unknown arguments, invalid
 values, conflicting commands/selectors, and forwarding failures exit nonzero.
+`--List` is a read-only one-shot query that prints a JSON display inventory, including hidden displays. It creates no GPUI window or normal app instance, and may take up to 25 seconds while hardware is queried. Its brightness field is hardware percent; it does not acknowledge queued writes in another instance.
+
 Execution is asynchronous: successful forwarding acknowledges queueing, not
 hardware completion. Selection/control failures are written to
 `%APPDATA%\Candle Tray\log.txt` and do not change the sender's exit status.

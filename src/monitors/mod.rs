@@ -18,9 +18,11 @@
 //! first `_`), matching legacy Twinkle Tray's `hwid[2]` key so imported
 //! settings line up.
 //!
-//! All levels crossing this API are hardware percentages (0..=100 of the
-//! backend's own range). Per-monitor min/max normalization is the caller's
-//! job (see `crate::levels`).
+//! Direct level setters and monitor snapshots use hardware percentages
+//! (0..=100 of the backend's own range). `Execute` accepts explicitly typed
+//! high-level action requests, evaluated on the worker with `crate::levels`
+//! before calling those same hardware-percent setters. Normalized values
+//! must never be passed directly to `SetBrightness` or `Apply`.
 
 use std::time::Duration;
 #[cfg(windows)]
@@ -72,6 +74,7 @@ pub struct Rect {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Monitor {
+    pub vcp_values: std::collections::BTreeMap<u8, (u32, u32)>,
     pub id: MonitorId,
     /// EDID manufacturer + product code, legacy `hwid[1]` (e.g. `DEL41D9`).
     pub model: String,
@@ -158,9 +161,15 @@ pub enum TurnOffMode {
 
 #[derive(Clone, Debug)]
 pub enum Command {
+    ConfigureFeatures {
+        id: MonitorId,
+        codes: Vec<u8>,
+    },
     /// Re-enumerate displays and re-read every level. Emits
     /// [`Event::Snapshot`] when done.
     Refresh,
+    /// FIFO writes per display; never coalesced or reordered within a sequence.
+    Execute(Vec<(MonitorId, crate::actions::Write)>, std::time::Instant),
     /// Re-read the current levels of connected displays through the handles
     /// already open (no re-enumeration). Emits [`Event::Updated`] per display.
     ReadLevels,
@@ -207,6 +216,9 @@ pub enum Command {
     },
     /// Minimum interval between hardware writes per target.
     SetThrottle(Duration),
+    /// Cancel queued brightness/SDR/contrast writes on session suspension.
+    /// An already executing driver call cannot be cancelled safely.
+    DiscardPendingLevels,
     Shutdown,
 }
 
@@ -231,6 +243,15 @@ pub enum SnapshotReason {
 
 #[derive(Clone, Debug)]
 pub enum Event {
+    /// Successful ordered action. Remembered levels are normalized slider
+    /// percentages; the monitor snapshot retains hardware percentages.
+    ActionApplied {
+        control: crate::actions::Control,
+        issued: std::time::Instant,
+        monitor: Monitor,
+        brightness: Option<u8>,
+        contrast: Option<u8>,
+    },
     /// Full list of displays, sorted by `num`.
     Snapshot {
         monitors: Vec<Monitor>,
@@ -247,6 +268,12 @@ pub struct MonitorService {
 }
 
 impl MonitorService {
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, std::sync::mpsc::Receiver<Command>) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        (Self { sender }, receiver)
+    }
+
     /// Start the coordinator thread, its hidden message window (display,
     /// power and resume notifications) and an initial refresh. `on_event` is
     /// called from service threads; it must be cheap and non-blocking.

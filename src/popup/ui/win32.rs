@@ -27,19 +27,21 @@ use windows_sys::Win32::{
         Shell::{DefSubclassProc, SetWindowSubclass},
         WindowsAndMessaging::{
             EVENT_SYSTEM_FOREGROUND, FindWindowExW, GWL_EXSTYLE, GWL_STYLE, GetWindowLongPtrW,
-            GetWindowRect, HTCLIENT, HWND_TOPMOST, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
-            SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+            GetWindowRect, HTCLIENT, HTTRANSPARENT, HWND_TOPMOST, SW_HIDE, SW_SHOWNOACTIVATE,
+            SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+            SWP_NOZORDER, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
             WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_DISPLAYCHANGE, WM_NCCALCSIZE,
             WM_NCHITTEST, WM_SETTINGCHANGE, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_LAYERED,
-            WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_MAXIMIZEBOX,
-            WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+            WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            WS_EX_TRANSPARENT, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
         },
     },
 };
 
 const SUBCLASS_ID: usize = 0x434D_4250; // "CMBP"
+const OSD_SUBCLASS_ID: usize = 0x434D_4F53; // "CMOS"
 const DWMWCP_DONOTROUND: u32 = 1;
+const DWMWCP_ROUND: u32 = 2;
 const DWMNCRP_DISABLED: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +167,59 @@ fn restyle(hwnd: HWND) {
         set_u32(DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED);
         set_u32(DWMWA_TRANSITIONS_FORCEDISABLED, 1);
 
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+        );
+    }
+}
+
+unsafe extern "system" fn osd_subclass_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    match message {
+        WM_NCCALCSIZE => 0,
+        // Clicks fall through to whatever lies below the indicator.
+        WM_NCHITTEST => HTTRANSPARENT as LRESULT,
+        _ => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
+    }
+}
+
+/// One-time restyle of GPUI's PopUp window into the level indicator: a
+/// borderless, click-through, never-activated topmost tool window that DWM
+/// rounds like the system volume flyout. Outside any GPUI borrow only.
+pub(crate) fn configure_osd(hwnd: HWND) {
+    unsafe {
+        SetWindowSubclass(hwnd, Some(osd_subclass_proc), OSD_SUBCLASS_ID, 0);
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        let style = (style
+            & !(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU))
+            | WS_POPUP;
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style as _);
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let ex_style = (ex_style & !(WS_EX_APPWINDOW | WS_EX_LAYERED))
+            | WS_EX_TOOLWINDOW
+            | WS_EX_TOPMOST
+            | WS_EX_NOACTIVATE
+            | WS_EX_TRANSPARENT;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style as _);
+        let preference = DWMWCP_ROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &preference as *const u32 as *const _,
+            size_of::<u32>() as u32,
+        );
         SetWindowPos(
             hwnd,
             HWND_TOPMOST,

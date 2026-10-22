@@ -164,6 +164,11 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
             crate::logger::error(format!("could not watch the foreground app: {error:#}"))
         })
         .ok();
+    let mut session = crate::session::Watcher::new()
+        .map_err(|error| {
+            crate::logger::error(format!("could not watch session state: {error:#}"));
+        })
+        .ok();
     let mut wheel = WheelHook::default();
     let mut light_sensor = None;
     let mut next_sensor_attempt = Instant::now();
@@ -174,6 +179,9 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
         let active = popup::is_visible() || wheel.is_watching();
         popup::wait_for_messages(Duration::from_millis(if active { 16 } else { 1000 }));
         popup::pump_messages();
+        if let Some(session) = &mut session {
+            session.poll();
+        }
         if !crate::light_sensor::is_enabled() {
             light_sensor = None;
             next_sensor_attempt = Instant::now();

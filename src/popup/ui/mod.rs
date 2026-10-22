@@ -16,6 +16,8 @@ pub(crate) mod controls;
 // Minibar's motion toolkit, kept whole so ported UI code keeps working.
 #[allow(dead_code)]
 pub(crate) mod fx;
+#[cfg(windows)]
+mod osd;
 mod root;
 pub(crate) mod slider;
 pub(crate) mod theme;
@@ -212,8 +214,9 @@ fn run(
                         cx.spawn(async move |cx| prewarm(window, cx).await).detach();
                     }
                 }
+                let mut osd_window = None;
                 while let Some(command) = commands.next().await {
-                    handle_command(command, &window, &model, cx);
+                    handle_command(command, &window, &model, &mut osd_window, cx);
                 }
             })
             .detach();
@@ -224,9 +227,24 @@ fn handle_command(
     command: PopupCommand,
     window: &gpui::WindowHandle<PopupRoot>,
     model: &gpui::Entity<AppModel>,
+    #[cfg(windows)] osd_window: &mut Option<gpui::WindowHandle<osd::Osd>>,
+    #[cfg(not(windows))] osd_window: &mut Option<()>,
     cx: &mut gpui::AsyncApp,
 ) {
     match command {
+        PopupCommand::Osd(name, value) => {
+            #[cfg(windows)]
+            {
+                if osd_window.is_none() {
+                    *osd_window = osd::create(model.clone(), cx);
+                }
+                if let Some(handle) = *osd_window {
+                    osd::show(handle, name, value, cx);
+                }
+            }
+            #[cfg(not(windows))]
+            let _ = (name, value);
+        }
         PopupCommand::Show { anchor } => {
             crate::idle::leave();
             let _ = model.update(cx, |model, _| model.read_levels());
@@ -306,6 +324,15 @@ fn handle_command(
         }
         PopupCommand::PowerSource { on_battery } => {
             let _ = model.update(cx, |model, cx| model.on_power_source(on_battery, cx));
+        }
+        PopupCommand::SessionLocked(locked) => {
+            let _ = model.update(cx, |model, cx| model.on_session_locked(locked, cx));
+        }
+        PopupCommand::Suspended(suspended) => {
+            let _ = model.update(cx, |model, cx| model.on_suspend(suspended, cx));
+        }
+        PopupCommand::LidClosed(closed) => {
+            let _ = model.update(cx, |model, cx| model.on_lid_closed(closed, cx));
         }
         PopupCommand::AmbientLight { lux } => {
             let _ = model.update(cx, |model, cx| model.on_ambient_light(lux, cx));
