@@ -173,6 +173,9 @@ pub enum Command {
     /// Re-read the current levels of connected displays through the handles
     /// already open (no re-enumeration). Emits [`Event::Updated`] per display.
     ReadLevels,
+    /// Emit a complete inventory after probes and capability reads finish or
+    /// time out. Unlike the initial Snapshot, this includes input/VCP support.
+    ReadInventory,
     /// Coalesced: only the latest value per monitor is written, at most once
     /// per throttle interval, and the final value is always written.
     SetBrightness {
@@ -219,6 +222,8 @@ pub enum Command {
     /// Cancel queued brightness/SDR/contrast writes on session suspension.
     /// An already executing driver call cannot be cancelled safely.
     DiscardPendingLevels,
+    /// Cancel queued writes only for these displays, preserving other workers.
+    DiscardPendingFor(Vec<MonitorId>),
     Shutdown,
 }
 
@@ -243,6 +248,8 @@ pub enum SnapshotReason {
 
 #[derive(Clone, Debug)]
 pub enum Event {
+    /// Inventory requested by [`Command::ReadInventory`].
+    Inventory(Vec<Monitor>),
     /// Successful ordered action. Remembered levels are normalized slider
     /// percentages; the monitor snapshot retains hardware percentages.
     ActionApplied {
@@ -284,12 +291,19 @@ impl MonitorService {
         }
         #[cfg(not(windows))]
         {
-            let (sender, _) = std::sync::mpsc::channel();
+            let (sender, receiver) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 on_event(Event::Snapshot {
                     monitors: Vec::new(),
                     reason: SnapshotReason::Startup,
-                })
+                });
+                while let Ok(command) = receiver.recv() {
+                    match command {
+                        Command::ReadInventory => on_event(Event::Inventory(Vec::new())),
+                        Command::Shutdown => break,
+                        _ => {}
+                    }
+                }
             });
             Self { sender }
         }

@@ -114,38 +114,63 @@ pub(super) fn match_physical(
     devices: &[String],
 ) -> Vec<Option<String>> {
     let mut claimed = std::collections::HashSet::new();
-    descriptions
-        .iter()
-        .enumerate()
-        .map(|(index, description)| {
-            let names: Vec<_> = targets
-                .iter()
-                .filter(|(_, name)| name == description)
-                .collect();
-            let by_name = (!description.is_empty()
-                && descriptions.iter().filter(|d| *d == description).count() == 1
-                && names.len() == 1)
-                .then(|| names[0].0.clone());
-            let by_device = devices
-                .get(index)
-                .and_then(|d| identity(d))
-                .map(|(_, id)| id);
-            let by_index = targets.get(index).map(|(id, _)| id.clone());
-            let key = by_name
-                .filter(|id| !claimed.contains(id))
-                .or_else(|| by_device.filter(|id| !claimed.contains(id)))
-                .or_else(|| by_index.filter(|id| !claimed.contains(id)));
-            if let Some(key) = &key {
-                claimed.insert(key.clone());
-            }
-            key
-        })
-        .collect()
+    let mut matches = vec![None; descriptions.len()];
+    // Reserve every exact name before weaker matches can consume its target.
+    for (index, description) in descriptions.iter().enumerate() {
+        let names: Vec<_> = targets
+            .iter()
+            .filter(|(_, name)| name == description)
+            .collect();
+        if !description.is_empty()
+            && descriptions.iter().filter(|d| *d == description).count() == 1
+            && names.len() == 1
+            && claimed.insert(names[0].0.clone())
+        {
+            matches[index] = Some(names[0].0.clone());
+        }
+    }
+    // Device identities outrank positional fallback, including identities
+    // for handles that appear later in the API's physical-monitor order.
+    for (index, matched) in matches.iter_mut().enumerate() {
+        if matched.is_none()
+            && let Some((_, id)) = devices.get(index).and_then(|device| identity(device))
+            && targets.iter().any(|(candidate, _)| *candidate == id)
+            && claimed.insert(id.clone())
+        {
+            *matched = Some(id);
+        }
+    }
+    let mut remaining = targets.iter().filter(|(id, _)| !claimed.contains(id));
+    for matched in &mut matches {
+        if matched.is_none() {
+            *matched = remaining.next().map(|(id, _)| id.clone());
+        }
+    }
+    matches
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fallback_cannot_steal_a_later_name_or_device_match() {
+        let targets = vec![
+            ("B".into(), "Panel B".into()),
+            ("A".into(), "Panel A".into()),
+        ];
+        assert_eq!(
+            match_physical(&["Unknown".into(), "Panel B".into()], &targets, &[]),
+            vec![Some("A".into()), Some("B".into())]
+        );
+        assert_eq!(
+            match_physical(
+                &["Unknown 1".into(), "Unknown 2".into()],
+                &targets,
+                &[String::new(), r"DISPLAY\MODEL\B".into()],
+            ),
+            vec![Some("A".into()), Some("B".into())]
+        );
+    }
     #[test]
     fn identities_merge() {
         assert_eq!(

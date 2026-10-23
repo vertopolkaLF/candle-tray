@@ -95,6 +95,22 @@ struct Slot {
     active: bool,
 }
 impl Slot {
+    fn discard_pending(&mut self) {
+        self.throttle.pending.clear();
+        self.ordered.clear();
+        self.power = None;
+        self.hdr = None;
+        self.input = None;
+    }
+
+    fn inventory_ready(&self) -> bool {
+        self.monitor.unresponsive
+            || (!self.awaiting_probe
+                && self.refresh.is_none()
+                && !self.capabilities
+                && self.busy.is_none())
+    }
+
     fn enqueue_action(&mut self, write: crate::actions::Write, issued: Instant) {
         // Drain earlier slider/control writes before the
         // sequence. Ordered actions themselves never coalesce.
@@ -153,6 +169,14 @@ impl Slot {
         } else {
             self.monitor.unresponsive = true;
             self.awaiting_probe = false;
+        }
+    }
+}
+
+fn discard_pending_for(slots: &mut HashMap<MonitorId, Slot>, ids: &[MonitorId]) {
+    for id in ids {
+        if let Some(slot) = slots.get_mut(id) {
+            slot.discard_pending();
         }
     }
 }
@@ -653,6 +677,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
     let epoch = Instant::now();
     let mut refresh = Some(SnapshotReason::Startup);
     let mut snapshot = None;
+    let mut inventory_requested = false;
     let mut reasons = vec![SnapshotReason::Startup];
     let mut debounce: Option<(Instant, SnapshotReason)> = None;
     let mut windows_off_at: Option<Instant> = None;
@@ -718,16 +743,14 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                         s.read = true;
                     }
                 }
+                Ok(Command::ReadInventory) => inventory_requested = true,
                 Ok(Command::SetThrottle(value)) => throttle = value,
                 Ok(Command::DiscardPendingLevels) => {
                     for slot in slots.values_mut() {
-                        slot.throttle.pending.clear();
-                        slot.ordered.clear();
-                        slot.power = None;
-                        slot.hdr = None;
-                        slot.input = None;
+                        slot.discard_pending();
                     }
                 }
+                Ok(Command::DiscardPendingFor(ids)) => discard_pending_for(&mut slots, &ids),
                 Ok(Command::SetBrightnessVcp { id, vcp }) => {
                     set_brightness_vcp(&mut brightness_vcps, &mut slots, id, vcp);
                 }
@@ -988,6 +1011,16 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 });
             }
         }
+        if inventory_requested
+            && snapshot.is_none()
+            && slots
+                .values()
+                .filter(|slot| slot.active)
+                .all(Slot::inventory_ready)
+        {
+            inventory_requested = false;
+            callback(Event::Inventory(sorted(&slots, None)));
+        }
         slots.retain(|_, slot| slot.active || slot.busy.is_some());
         // Poll quickly only while work is in flight; an idle tray app must not
         // wake the CPU 100 times a second. Commands wake the idle wait at once.
@@ -1033,6 +1066,59 @@ fn sorted(slots: &HashMap<String, Slot>, ids: Option<&Vec<String>>) -> Vec<Monit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventory_waits_for_capability_reply_but_not_for_a_timed_out_worker() {
+        let mut display = slot();
+        assert!(!display.inventory_ready());
+        display.awaiting_probe = false;
+        display.capabilities = true;
+        assert!(!display.inventory_ready());
+        display.capabilities = false;
+        let now = Instant::now();
+        display.busy = Some((1, now, Duration::from_secs(15)));
+        assert!(!display.inventory_ready());
+        // A successful capability reply populates the inventory before it is ready.
+        display.monitor.inputs = vec![0x11, 0x12];
+        display.monitor.vcp_codes = vec![0x10, 0x60];
+        display.busy = None;
+        assert!(display.inventory_ready());
+        assert_eq!(display.monitor.inputs, [0x11, 0x12]);
+        display.busy = Some((2, now, Duration::from_secs(15)));
+        assert!(display.expire(now + Duration::from_secs(15)));
+        assert!(display.inventory_ready());
+        assert!(display.busy.is_some());
+    }
+
+    #[test]
+    fn targeted_cancellation_preserves_external_actions_and_in_flight_calls() {
+        let pending = || {
+            let mut display = slot();
+            display.throttle.set(Level::Brightness, 80);
+            display.ordered.push_back(Work::Input(0x12));
+            display.power = Some(false);
+            display.hdr = Some(true);
+            display.input = Some(0x11);
+            display.busy = Some((1, Instant::now(), Duration::from_secs(3)));
+            display
+        };
+        let mut slots = HashMap::from([
+            ("internal".into(), pending()),
+            ("external".into(), pending()),
+        ]);
+        discard_pending_for(&mut slots, &["internal".into(), "disconnected".into()]);
+        let internal = &slots["internal"];
+        assert!(internal.throttle.pending.is_empty());
+        assert!(internal.ordered.is_empty());
+        assert!(internal.power.is_none() && internal.hdr.is_none() && internal.input.is_none());
+        assert!(internal.busy.is_some());
+        let external = &slots["external"];
+        assert_eq!(external.throttle.pending.get(&Level::Brightness), Some(&80));
+        assert!(matches!(external.ordered.front(), Some(Work::Input(0x12))));
+        assert_eq!(external.power, Some(false));
+        assert_eq!(external.hdr, Some(true));
+        assert_eq!(external.input, Some(0x11));
+    }
     #[test]
     fn action_dispatch_preserves_prior_slider_write_and_sequence_order() {
         use crate::actions::{Control, Operation, Write};

@@ -31,9 +31,9 @@ pub struct AppModel {
     /// Accepted import whose name-keyed entries resolve on the next snapshot.
     import_pending: Option<PendingImport>,
     pending_cli: Vec<crate::cli::Command>,
-    /// When the user last set each display, so hardware echoes of earlier
-    /// throttled writes cannot drag the slider back mid-drag.
-    local_edits: HashMap<String, Instant>,
+    /// Track each level independently so an edit to one control cannot hide
+    /// a successful acknowledgement for another control on the same display.
+    local_edits: HashMap<String, LocalEdits>,
     /// Set while the displays are dimmed for inactivity: the displays that
     /// were dimmed. Their remembered levels come back on the next input.
     idle_dimmed: Option<Vec<String>>,
@@ -83,6 +83,41 @@ struct FadeStep {
     to: u8,
     /// Level written last.
     current: u8,
+}
+
+#[derive(Clone, Copy, Default)]
+struct LevelFields {
+    brightness: bool,
+    sdr: bool,
+    contrast: bool,
+}
+
+#[derive(Default)]
+struct LocalEdits {
+    brightness: Option<Instant>,
+    sdr: Option<Instant>,
+    contrast: Option<Instant>,
+}
+
+impl LocalEdits {
+    fn protection(&mut self, affected: LevelFields, issued: Option<Instant>) -> LevelFields {
+        let now = Instant::now();
+        let protect = |edited: &mut Option<Instant>, affected| {
+            if affected && let Some(issued) = issued {
+                if edited.is_some_and(|edited| edited > issued) {
+                    return true;
+                }
+                *edited = None;
+                return false;
+            }
+            edited.is_some_and(|edited| now.saturating_duration_since(edited) < LOCAL_EDIT_HOLD)
+        };
+        LevelFields {
+            brightness: protect(&mut self.brightness, affected.brightness),
+            sdr: protect(&mut self.sdr, affected.sdr),
+            contrast: protect(&mut self.contrast, affected.contrast),
+        }
+    }
 }
 
 /// Pause before turning displays off from a shortcut or the tray menu.
@@ -169,6 +204,7 @@ impl AppModel {
 
     pub fn handle_monitor_event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
+            Event::Inventory(_) => return,
             Event::ActionApplied {
                 control,
                 issued,
@@ -176,56 +212,13 @@ impl AppModel {
                 brightness,
                 contrast,
             } => {
-                // Only successful action writes update remembered levels. The
-                // worker's acknowledgement wins over prior local slider echoes.
-                if self
-                    .local_edits
-                    .get(&monitor.id)
-                    .is_some_and(|at| *at > issued)
-                {
-                    return;
-                }
-                self.local_edits.remove(&monitor.id);
-                let separate_sdr = (!self.settings.monitor(&monitor.id).sdr_primary
-                    && monitor.brightness.is_some())
-                .then_some(monitor.sdr)
-                .flatten()
-                .map(|sdr| sdr.percent);
-                if brightness.is_some() || contrast.is_some() || separate_sdr.is_some() {
-                    let entry = self
-                        .settings
-                        .monitors
-                        .entry(monitor.id.clone())
-                        .or_default();
-                    if let Some(value) = separate_sdr {
-                        entry.last_sdr = Some(value);
-                    }
-                    if let Some(value) = brightness {
-                        entry.last_brightness = Some(value);
-                    }
-                    if let Some(value) = contrast {
-                        entry.last_contrast = Some(value);
-                    }
-                    self.save();
-                }
-                let osd_level = match control {
-                    crate::actions::Control::Brightness => brightness,
-                    crate::actions::Control::Contrast => contrast,
-                    crate::actions::Control::Sdr => monitor.sdr.map(|sdr| sdr.percent),
-                    crate::actions::Control::Vcp(0x62) => {
-                        monitor.vcp_values.get(&0x62).map(|(value, maximum)| {
-                            ((u64::from(*value) * 100) / u64::from((*maximum).max(1))).min(100)
-                                as u8
-                        })
-                    }
-                    _ => None,
-                };
                 let osd_name = self
                     .settings
                     .monitor(&monitor.id)
                     .name
                     .unwrap_or_else(|| monitor.name.clone());
-                self.handle_monitor_event(Event::Updated(monitor), cx);
+                let osd_level =
+                    self.apply_action_reply(control, issued, monitor, brightness, contrast);
                 if self.osd_until.is_some_and(|until| Instant::now() < until)
                     && let Some(value) = osd_level
                 {
@@ -302,37 +295,101 @@ impl AppModel {
                 }
             }
             Event::Updated(monitor) => {
-                if let Some(slot) = self.monitors.iter_mut().find(|m| m.id == monitor.id) {
-                    // Levels the user set moments ago win over echoes of
-                    // older writes still draining through the throttle.
-                    let recent = self
-                        .local_edits
-                        .get(&monitor.id)
-                        .is_some_and(|at| at.elapsed() < LOCAL_EDIT_HOLD);
-                    let (brightness, sdr, contrast) = (slot.brightness, slot.sdr, slot.contrast);
-                    *slot = monitor;
-                    if recent || slot.brightness.is_none() {
-                        slot.brightness = brightness.or(slot.brightness);
-                    }
-                    if recent && slot.sdr.is_some() {
-                        slot.sdr = sdr.or(slot.sdr);
-                    }
-                    if recent && slot.contrast.is_some() {
-                        slot.contrast = contrast.or(slot.contrast);
-                    }
-                    let old = Monitor {
-                        brightness,
-                        sdr,
-                        ..slot.clone()
-                    };
-                    self.carry_level(&old);
-                } else {
-                    self.monitors.push(monitor);
-                    self.monitors.sort_by_key(|m| m.num);
-                }
+                let protected = self
+                    .local_edits
+                    .get_mut(&monitor.id)
+                    .map(|edits| edits.protection(LevelFields::default(), None))
+                    .unwrap_or_default();
+                self.update_monitor(monitor, protected);
             }
         }
         cx.notify();
+    }
+
+    fn apply_action_reply(
+        &mut self,
+        control: crate::actions::Control,
+        issued: Instant,
+        monitor: Monitor,
+        brightness: Option<u8>,
+        contrast: Option<u8>,
+    ) -> Option<u8> {
+        use crate::actions::Control;
+        let settings = self.settings.monitor(&monitor.id);
+        let sdr_primary =
+            monitor.sdr.is_some() && (settings.sdr_primary || monitor.brightness.is_none());
+        let affected = LevelFields {
+            brightness: (control == Control::Brightness && !sdr_primary)
+                || matches!(control, Control::Vcp(code)
+                    if matches!(monitor.backend, crate::monitors::BrightnessBackend::Ddc { vcp } if vcp == code)),
+            sdr: control == Control::Sdr || (control == Control::Brightness && sdr_primary),
+            contrast: matches!(control, Control::Contrast | Control::Vcp(0x12)),
+        };
+        let protected = self
+            .local_edits
+            .entry(monitor.id.clone())
+            .or_default()
+            .protection(affected, Some(issued));
+        let brightness = brightness.filter(|_| {
+            (affected.brightness && !protected.brightness) || (affected.sdr && !protected.sdr)
+        });
+        let contrast = contrast.filter(|_| affected.contrast && !protected.contrast);
+        let separate_sdr = monitor.sdr.filter(|_| {
+            affected.sdr && !protected.sdr && !settings.sdr_primary && monitor.brightness.is_some()
+        });
+        if brightness.is_some() || contrast.is_some() || separate_sdr.is_some() {
+            let entry = self
+                .settings
+                .monitors
+                .entry(monitor.id.clone())
+                .or_default();
+            if let Some(sdr) = separate_sdr {
+                entry.last_sdr = Some(sdr.percent);
+            }
+            if let Some(value) = brightness {
+                entry.last_brightness = Some(value);
+            }
+            if let Some(value) = contrast {
+                entry.last_contrast = Some(value);
+            }
+            self.save();
+        }
+        let osd = match control {
+            Control::Brightness => brightness,
+            Control::Contrast => contrast,
+            Control::Sdr if !protected.sdr => monitor.sdr.map(|sdr| sdr.percent),
+            Control::Vcp(0x62) => monitor.vcp_values.get(&0x62).map(|(value, maximum)| {
+                ((u64::from(*value) * 100) / u64::from((*maximum).max(1))).min(100) as u8
+            }),
+            _ => None,
+        };
+        self.update_monitor(monitor, protected);
+        osd
+    }
+
+    fn update_monitor(&mut self, monitor: Monitor, protected: LevelFields) {
+        if let Some(slot) = self.monitors.iter_mut().find(|m| m.id == monitor.id) {
+            let (brightness, sdr, contrast) = (slot.brightness, slot.sdr, slot.contrast);
+            *slot = monitor;
+            if protected.brightness || slot.brightness.is_none() {
+                slot.brightness = brightness.or(slot.brightness);
+            }
+            if protected.sdr && slot.sdr.is_some() {
+                slot.sdr = sdr.or(slot.sdr);
+            }
+            if protected.contrast && slot.contrast.is_some() {
+                slot.contrast = contrast.or(slot.contrast);
+            }
+            let old = Monitor {
+                brightness,
+                sdr,
+                ..slot.clone()
+            };
+            self.carry_level(&old);
+        } else {
+            self.monitors.push(monitor);
+            self.monitors.sort_by_key(|m| m.num);
+        }
     }
 
     /// HDR switched on or off since `old` (from here or from Windows): the
@@ -635,18 +692,22 @@ impl AppModel {
         let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) else {
             return;
         };
-        self.local_edits.insert(id.to_owned(), Instant::now());
         if let Some(sdr) = monitor
             .sdr
             .as_mut()
             .filter(|_| entry.sdr_primary || monitor.brightness.is_none())
         {
+            self.local_edits.entry(id.to_owned()).or_default().sdr = Some(Instant::now());
             sdr.percent = slider;
             self.service.send(Command::SetSdr {
                 id: id.to_owned(),
                 percent: slider,
             });
         } else {
+            self.local_edits
+                .entry(id.to_owned())
+                .or_default()
+                .brightness = Some(Instant::now());
             let hardware = entry.to_hardware(slider);
             monitor.brightness = Some(hardware);
             self.service.send(Command::SetBrightness {
@@ -842,7 +903,7 @@ impl AppModel {
         if let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) {
             monitor.contrast = Some(percent);
         }
-        self.local_edits.insert(id.to_owned(), Instant::now());
+        self.local_edits.entry(id.to_owned()).or_default().contrast = Some(Instant::now());
         self.service.send(Command::SetContrast {
             id: id.to_owned(),
             percent,
@@ -1258,7 +1319,7 @@ impl AppModel {
         // A fade must not retain a closed panel as a write target.
         if self.settings.hide_closed_lid {
             if closed {
-                self.service.send(Command::DiscardPendingLevels);
+                self.discard_closed_panel_writes();
                 if let Some(fade) = &mut self.fade {
                     fade.steps.retain(|step| {
                         !self.monitors.iter().any(|m| {
@@ -1279,6 +1340,18 @@ impl AppModel {
             }
         }
         cx.notify();
+    }
+
+    fn discard_closed_panel_writes(&self) {
+        let ids: Vec<_> = self
+            .monitors
+            .iter()
+            .filter(|monitor| monitor.kind == crate::monitors::MonitorKind::Internal)
+            .map(|monitor| monitor.id.clone())
+            .collect();
+        if !ids.is_empty() {
+            self.service.send(Command::DiscardPendingFor(ids));
+        }
     }
 
     fn reconcile_active_trigger(&mut self, cx: &mut Context<Self>) {
@@ -1627,13 +1700,22 @@ impl AppModel {
 
     /// The computer switched between battery and mains power.
     pub fn on_power_source(&mut self, on_battery: bool, cx: &mut Context<Self>) {
+        if self.apply_power_source(on_battery) {
+            if let Some(exe) = self.foreground.clone() {
+                self.on_foreground(&exe, cx);
+            }
+            cx.notify();
+        }
+    }
+
+    fn apply_power_source(&mut self, on_battery: bool) -> bool {
         // The state at startup is not a switch.
         if self
             .on_battery
             .replace(on_battery)
             .is_none_or(|was| was == on_battery)
         {
-            return;
+            return false;
         }
         let wanted = if on_battery {
             crate::settings::TriggerCondition::OnBattery
@@ -1655,11 +1737,11 @@ impl AppModel {
             } else if self.app_trigger.is_none() {
                 self.apply_automatic_profile(profile);
                 self.automatic.manual = false;
-                if let Some(exe) = self.foreground.clone() {
-                    self.on_foreground(&exe, cx);
-                }
+                self.save();
+                return true;
             }
         }
+        false
     }
 
     /// The levels the user chose for every controllable display, as a
@@ -1726,6 +1808,7 @@ impl AppModel {
             return;
         };
         if let Some(sdr) = monitor.sdr.as_mut() {
+            self.local_edits.entry(id.to_owned()).or_default().sdr = Some(Instant::now());
             sdr.percent = value.min(100);
             self.settings
                 .monitors
@@ -1893,6 +1976,9 @@ impl AppModel {
             self.reconcile_session(cx);
         }
         if self.automatic.blocked(&self.settings) {
+            if self.settings.adaptive != before.adaptive {
+                self.adaptive_changed(before.adaptive);
+            }
             return;
         }
         if self.settings.adaptive != before.adaptive {
@@ -1953,7 +2039,7 @@ impl AppModel {
             self.triggers_changed(before, cx);
         }
         if self.settings.adaptive != before.adaptive {
-            self.apply_adaptive();
+            self.adaptive_changed(before.adaptive);
         }
         if before.idle_dim != self.settings.idle_dim {
             if before.idle_dim.level != self.settings.idle_dim.level {
@@ -1961,6 +2047,17 @@ impl AppModel {
             }
             self.check_idle();
         }
+    }
+
+    fn adaptive_changed(&mut self, before: crate::settings::AdaptiveBrightness) {
+        self.automatic.manual = false;
+        if before.enabled && !self.settings.adaptive.enabled {
+            // ALS may have overwritten an entry already marked as applied.
+            // Return ownership to that entry as soon as the sensor is disabled.
+            self.schedule_applied = None;
+            self.run_schedule(false);
+        }
+        self.apply_adaptive();
     }
 
     /// Another thread changed the stored settings; nothing is persisted here.
@@ -2163,6 +2260,204 @@ pub fn restore_targets(
 mod tests {
     use super::*;
     use crate::monitors::{BrightnessBackend, MonitorKind, SdrLevel};
+
+    #[test]
+    fn action_acknowledgements_merge_independent_levels_and_reject_stale_same_level() {
+        use crate::actions::Control;
+        let (mut model, _) = model();
+        model.monitors[0].brightness = Some(50);
+        model.monitors[0].contrast = Some(20);
+        model.settings.monitors.insert(
+            "a".into(),
+            MonitorSettings {
+                last_brightness: Some(50),
+                last_contrast: Some(20),
+                ..Default::default()
+            },
+        );
+        let issued = Instant::now();
+        model.apply_contrast("a", 60);
+        model.local_edits.get_mut("a").unwrap().contrast = Some(issued + Duration::from_millis(1));
+        let mut reply = model.monitors[0].clone();
+        reply.brightness = Some(80);
+        reply.contrast = Some(20);
+        assert_eq!(
+            model.apply_action_reply(Control::Brightness, issued, reply, Some(80), None),
+            Some(80)
+        );
+        assert_eq!(model.monitors[0].brightness, Some(80));
+        assert_eq!(model.monitors[0].contrast, Some(60));
+        assert_eq!(model.settings.monitor("a").last_brightness, Some(80));
+        assert_eq!(model.settings.monitor("a").last_contrast, Some(60));
+
+        model.apply_level("a", 90);
+        model.local_edits.get_mut("a").unwrap().brightness =
+            Some(issued + Duration::from_millis(3));
+        let mut reply = model.monitors[0].clone();
+        reply.brightness = Some(80);
+        reply.contrast = Some(30);
+        assert_eq!(
+            model.apply_action_reply(
+                Control::Contrast,
+                issued + Duration::from_millis(2),
+                reply,
+                None,
+                Some(30)
+            ),
+            Some(30)
+        );
+        assert_eq!(model.monitors[0].brightness, Some(90));
+        assert_eq!(model.monitors[0].contrast, Some(30));
+
+        let mut reply = model.monitors[0].clone();
+        reply.brightness = Some(40);
+        assert_eq!(
+            model.apply_action_reply(Control::Brightness, issued, reply, Some(40), None),
+            None
+        );
+        assert_eq!(model.monitors[0].brightness, Some(90));
+        assert_eq!(model.settings.monitor("a").last_brightness, Some(90));
+    }
+
+    #[test]
+    fn independent_sdr_acknowledgement_survives_a_newer_hardware_brightness_edit() {
+        let (mut model, _) = model();
+        model.monitors = vec![monitor("a", Some(50), Some(20))];
+        model.settings.monitors.insert(
+            "a".into(),
+            MonitorSettings {
+                sdr_primary: false,
+                last_sdr: Some(20),
+                ..Default::default()
+            },
+        );
+        let issued = Instant::now();
+        model.apply_level("a", 90);
+        model.local_edits.get_mut("a").unwrap().brightness =
+            Some(issued + Duration::from_millis(1));
+        let mut reply = monitor("a", Some(50), Some(80));
+        model.apply_action_reply(
+            crate::actions::Control::Sdr,
+            issued,
+            reply.clone(),
+            None,
+            None,
+        );
+        assert_eq!(model.monitors[0].brightness, Some(90));
+        assert_eq!(model.monitors[0].sdr.unwrap().percent, 80);
+        assert_eq!(model.settings.monitor("a").last_sdr, Some(80));
+        // An unrelated action's full snapshot must not persist an old SDR echo.
+        reply.brightness = Some(95);
+        reply.sdr = Some(SdrLevel { percent: 10 });
+        model.apply_action_reply(
+            crate::actions::Control::Brightness,
+            issued + Duration::from_secs(1),
+            reply,
+            Some(95),
+            None,
+        );
+        assert_eq!(model.settings.monitor("a").last_sdr, Some(80));
+    }
+
+    #[test]
+    fn disabling_adaptive_reapplies_the_current_schedule_entry() {
+        let (mut model, _) = model();
+        model.settings.schedule.enabled = true;
+        model
+            .settings
+            .schedule
+            .entries
+            .push(crate::settings::ScheduleEntry {
+                time: crate::settings::ScheduleTime::Clock { minutes: 0 },
+                target: ScheduleTarget::Level { level: 30 },
+            });
+        assert!(model.run_schedule(false));
+        let key = model.schedule_applied;
+        model.settings.adaptive.enabled = true;
+        model.settings.adaptive.bright_level = 80;
+        model.ambient_lux = Some(1000.0);
+        assert!(model.apply_adaptive());
+        assert_eq!(model.slider_of("a"), Some(80));
+        let before = model.settings.adaptive;
+        model.settings.adaptive.enabled = false;
+        model.adaptive_changed(before);
+        assert_eq!(model.slider_of("a"), Some(30));
+        assert_eq!(model.schedule_applied, key);
+
+        // A held foreground profile still owns the displays; the entry waits.
+        model.settings.adaptive.enabled = true;
+        model.apply_level("a", 65);
+        model.app_trigger = Some((0, BTreeMap::new()));
+        let before = model.settings.adaptive;
+        model.settings.adaptive.enabled = false;
+        model.adaptive_changed(before);
+        assert_eq!(model.slider_of("a"), Some(65));
+        assert!(model.schedule_applied.is_none());
+        model.app_trigger = None;
+        assert!(model.run_schedule(false));
+        assert_eq!(model.slider_of("a"), Some(30));
+
+        model.settings.adaptive.enabled = true;
+        model.settings.pause_when_locked = true;
+        model.automatic.locked = true;
+        model.automatic.manual = true;
+        let before = model.settings.adaptive;
+        model.settings.adaptive.enabled = false;
+        model.adaptive_changed(before);
+        assert!(model.schedule_applied.is_none());
+        assert!(!model.automatic.manual);
+        model.automatic.locked = false;
+        assert!(model.run_schedule(false));
+    }
+
+    #[test]
+    fn power_profile_persists_without_a_foreground_trigger_or_later_edits() {
+        let (mut model, _) = model();
+        let saved = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let snapshots = saved.clone();
+        model.persist = Arc::new(move |settings| snapshots.lock().unwrap().push(settings.clone()));
+        model.settings.profiles.push(Profile {
+            levels: BTreeMap::from([(
+                "a".into(),
+                ProfileLevels {
+                    brightness: Some(25),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        });
+        model
+            .settings
+            .triggers
+            .push(crate::settings::ProfileTrigger {
+                condition: crate::settings::TriggerCondition::OnBattery,
+                profile: 0,
+            });
+        assert!(!model.apply_power_source(false));
+        assert!(saved.lock().unwrap().is_empty());
+        assert!(model.apply_power_source(true));
+        assert_eq!(model.slider_of("a"), Some(25));
+        assert_eq!(
+            saved.lock().unwrap()[0].monitor("a").last_brightness,
+            Some(25)
+        );
+        assert!(!model.apply_power_source(true));
+        assert_eq!(saved.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn lid_cancellation_selects_only_internal_displays() {
+        let (mut model, receiver) = model();
+        model.monitors[0].kind = MonitorKind::Internal;
+        model.discard_closed_panel_writes();
+        assert!(
+            matches!(receiver.try_recv().unwrap(), Command::DiscardPendingFor(ids) if ids == vec!["a"])
+        );
+        assert!(receiver.try_recv().is_err());
+        model.monitors[0].kind = MonitorKind::External;
+        model.discard_closed_panel_writes();
+        assert!(receiver.try_recv().is_err());
+    }
 
     #[test]
     fn hardware_primary_profiles_capture_and_restore_independent_sdr() {

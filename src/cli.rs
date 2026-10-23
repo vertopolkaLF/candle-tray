@@ -324,14 +324,15 @@ impl Selector {
 pub fn list_displays() -> Result<String> {
     use crate::monitors::{Event, MonitorService};
     let (sender, receiver) = std::sync::mpsc::channel();
-    let _service = MonitorService::start(move |event| {
+    let service = MonitorService::start(move |event| {
         let _ = sender.send(event);
     });
+    service.send(crate::monitors::Command::ReadInventory);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
     loop {
         let event =
             receiver.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))?;
-        if let Event::Snapshot { mut monitors, .. } = event {
+        if let Event::Inventory(mut monitors) = event {
             let settings = crate::settings::Settings::default_path()
                 .ok()
                 .and_then(|path| std::fs::read_to_string(path).ok())

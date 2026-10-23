@@ -41,6 +41,32 @@ actions!(
 const CONTEXT: &str = "SettingsInput";
 const MASK: char = '\u{2022}';
 
+fn utf16_offset(text: &str, offset: usize) -> usize {
+    let mut bytes = 0;
+    let mut units = 0;
+    for ch in text.chars() {
+        if units >= offset {
+            break;
+        }
+        units += ch.len_utf16();
+        bytes += ch.len_utf8();
+    }
+    bytes
+}
+
+fn composition_selection(
+    text: &str,
+    start: usize,
+    selected: Option<&Range<usize>>,
+) -> Range<usize> {
+    match selected {
+        Some(range) => {
+            start + utf16_offset(text, range.start)..start + utf16_offset(text, range.end)
+        }
+        None => start + text.len()..start + text.len(),
+    }
+}
+
 pub(crate) fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, Some(CONTEXT)),
@@ -392,16 +418,7 @@ impl TextInput {
     }
 
     fn offset_from_utf16(&self, offset: usize) -> usize {
-        let mut utf8_offset = 0;
-        let mut utf16_count = 0;
-        for ch in self.content.chars() {
-            if utf16_count >= offset {
-                break;
-            }
-            utf16_count += ch.len_utf16();
-            utf8_offset += ch.len_utf8();
-        }
-        utf8_offset
+        utf16_offset(&self.content, offset)
     }
 
     fn offset_to_utf16(&self, offset: usize) -> usize {
@@ -533,11 +550,8 @@ impl EntityInputHandler for TextInput {
         self.content = content.into();
         self.marked_range =
             (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
-        self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.selected_range =
+            composition_selection(new_text, range.start, new_selected_range_utf16.as_ref());
         cx.emit(InputEvent::Changed);
         cx.notify();
     }
@@ -895,5 +909,29 @@ impl<V: 'static> Inputs<V> {
         self.entities.retain(|id, _| !id.starts_with(prefix));
         self.commits.retain(|id, _| !id.starts_with(prefix));
         self.subscriptions.retain(|id, _| !id.starts_with(prefix));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::composition_selection;
+
+    #[test]
+    fn ime_selection_is_relative_to_composition_not_document_prefix() {
+        assert_eq!(
+            composition_selection("abc", "你".len(), Some(&(1..1))),
+            4..4
+        );
+        assert_eq!(
+            composition_selection("かな", "a".len(), Some(&(1..2))),
+            4..7
+        );
+        assert_eq!(
+            composition_selection("😀a", "前".len(), Some(&(2..3))),
+            7..8
+        );
+        assert_eq!(composition_selection("かな", 5, None), 11..11);
+        // Clamp a stale IME cursor to the inserted text, not the rest of the document.
+        assert_eq!(composition_selection("a", 3, Some(&(9..9))), 4..4);
     }
 }
