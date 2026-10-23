@@ -42,6 +42,8 @@ Click the tray icon for brightness sliders for every display: external monitors 
 and laptop panels through WMI. Optional contrast sliders (VCP 0x12) and input source buttons
 (VCP 0x60) can be turned on per display. HDR displays get an HDR toggle and an SDR white level
 slider. Link levels to move every display together, or turn the displays off from the popup.
+A moon button in the bottom bar switches Windows Night light; while it is on, its strength
+slider shows at the end of the list.
 Scrolling over the tray icon changes brightness too.
 
 ### Per-display settings
@@ -83,7 +85,9 @@ glyphs. English and Russian interfaces.
 
 ### More features
 
-- Global shortcuts for brightness steps, profiles and turning displays off.
+- Windows Night light on/off and strength in the popup, with a global shortcut and
+  command-line control.
+- Global shortcuts for brightness steps, profiles, Night light and turning displays off.
 - Restoring levels after sleep and display reconnection.
 - Command-line control for scripts (see [Command line](#command-line)).
 - Twinkle Tray settings import.
@@ -132,6 +136,8 @@ candle-tray.exe --contrast 70 [--display <selector>]
 candle-tray.exe --profile "Night"
 candle-tray.exe --off
 candle-tray.exe --input HDMI1 --display <selector>
+candle-tray.exe --NightLight on|off|toggle
+candle-tray.exe --NightLightStrength 40
 candle-tray.exe --show
 candle-tray.exe --List
 candle-tray.exe --VCP=0x62:35 --MonitorNum=1 --Overlay
@@ -147,6 +153,10 @@ offsets are signed integer percentage points, clamped to 0–100 per display.
 Brightness uses the popup slider scale, including configured min/max mapping
 and SDR white level while HDR is active. Contrast requires per-display opt-in.
 Unavailable controls/displays are skipped and logged.
+
+`--NightLight` switches Windows Night light; its own schedule can switch it again
+later. `--NightLightStrength` sets the strength from 0 (6500 K) to 100 (1200 K),
+like the Strength slider in Windows Settings. Neither accepts a display selector.
 
 Profiles accept a case-insensitive full name or a 1-based profile number.
 Duplicate names are rejected. `--off` uses the configured power-off method.

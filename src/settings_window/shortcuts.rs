@@ -138,6 +138,17 @@ impl SettingsWindow {
             rows
         });
 
+        let night_light = kit::card_of(k, |k| {
+            vec![self.hotkey_row(
+                k,
+                Action::ToggleNightLight,
+                s.shortcuts.night_light,
+                tr("shortcuts-night-light"),
+                Some(tr("shortcuts-night-light-description")),
+                cx,
+            )]
+        });
+
         let mouse = kit::card_of(k, |k| {
             let mut rows = vec![kit::toggle_row(
                 k,
@@ -169,6 +180,8 @@ impl SettingsWindow {
             brightness,
             kit::section_heading(k, tr("shortcuts-section-power")),
             turn_off,
+            kit::section_heading(k, tr("shortcuts-section-night-light")),
+            night_light,
             kit::section_heading(k, tr("shortcuts-section-mouse")),
             mouse,
             kit::caption(k, tr("shortcuts-profiles-note")),
@@ -291,5 +304,6 @@ fn action_key(action: Action) -> String {
         Action::BrightnessUp => "brightness-up".into(),
         Action::BrightnessDown => "brightness-down".into(),
         Action::TurnOff => "turn-off".into(),
+        Action::ToggleNightLight => "night-light".into(),
     }
 }

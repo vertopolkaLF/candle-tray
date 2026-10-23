@@ -57,6 +57,8 @@ pub enum PopupCommand {
     AmbientLight {
         lux: f32,
     },
+    /// Windows Night Light changed, `None` where it is unavailable.
+    NightLight(Option<crate::night_light::NightLight>),
     /// Run on the GPUI thread with the app context (tray menu actions etc.).
     Run(Box<dyn FnOnce(&mut gpui::App) + Send>),
 }

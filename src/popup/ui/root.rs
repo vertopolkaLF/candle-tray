@@ -973,6 +973,10 @@ impl PopupRoot {
         let linked = model.settings.link_levels;
         let loaded = model.loaded;
         let offer = model.import_offer.is_some();
+        // The footer switch turns it on; strength shows only while on.
+        let night_light = model
+            .night_light
+            .filter(|night_light| model.settings.show_night_light && night_light.on);
         let mut body = Vec::new();
         if let Some(update) = crate::updater::popup_offer() {
             body.push(self.render_update_offer(update, cx));
@@ -996,6 +1000,10 @@ impl PopupRoot {
                     .child(SharedString::from(text.to_owned()))
                     .into_any_element(),
             );
+            if let Some(night_light) = night_light {
+                body.push(self.divider());
+                body.push(self.render_night_light(night_light, cx));
+            }
             return body;
         }
         let controllable: Vec<&MonitorRow> =
@@ -1029,6 +1037,9 @@ impl PopupRoot {
                 sections.push(self.render_monitor_card(row, false, inner_width, cx));
             }
         }
+        if let Some(night_light) = night_light {
+            sections.push(self.render_night_light(night_light, cx));
+        }
         for (index, section) in sections.into_iter().enumerate() {
             if index > 0 {
                 body.push(self.divider());
@@ -1036,6 +1047,36 @@ impl PopupRoot {
             body.push(section);
         }
         body
+    }
+
+    /// Windows Night Light strength, shown while Night Light is on.
+    fn render_night_light(
+        &mut self,
+        night_light: crate::night_light::NightLight,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let header = self.card_header(
+            crate::i18n::tr("popup-night-light").to_owned(),
+            None,
+            None,
+            None,
+        );
+        let model = self.model.clone();
+        let on_change: slider::Handler = Rc::new(move |value, _, cx| {
+            model.update(cx, |model, cx| model.set_night_light_strength(value, cx));
+        });
+        let slider = self.slider_row(
+            "night-light-strength".into(),
+            "fluent-temperature",
+            night_light.strength,
+            true,
+            on_change,
+            cx,
+        );
+        self.section()
+            .child(header)
+            .child(slider)
+            .into_any_element()
     }
 
     /// Hairline between flat display sections.
@@ -1665,7 +1706,24 @@ impl PopupRoot {
             .filter(|row| row.slider.is_some())
             .count()
             > 1;
+        let night_light = model
+            .night_light
+            .filter(|_| model.settings.show_night_light)
+            .map(|night_light| night_light.on);
         let radius = crate::popup::corner_radius_dip() as f32;
+        let night_light_model = self.model.clone();
+        let night_light = night_light.map(|on| {
+            self.footer_button(
+                "night-light",
+                "fluent-moon",
+                on,
+                move |_, _, cx| {
+                    night_light_model.update(cx, |model, cx| model.set_night_light(!on, cx))
+                },
+                cx,
+            )
+            .into_any_element()
+        });
         let link_model = self.model.clone();
         let link = can_link.then(|| {
             self.footer_button(
@@ -1703,6 +1761,7 @@ impl PopupRoot {
             .border_color(palette.card_stroke)
             .bg(palette.footer_background)
             .child(profiles)
+            .children(night_light)
             .children(link)
             .child(settings);
         // By a top taskbar the bar caps the capsule instead of closing it.

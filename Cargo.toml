@@ -36,6 +36,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 windows-core = { git = "https://github.com/microsoft/windows-rs", rev = "07f344c019b8fdae4d398d4c2591596044cb416a" }
 windows-numerics = { git = "https://github.com/microsoft/windows-rs", rev = "07f344c019b8fdae4d398d4c2591596044cb416a" }
 tray-icon = { version = "0.24", default-features = false }
+win-nightlight-lib = "0.5"
+win-nightlight-watch = "0.5"
 windows = { git = "https://github.com/microsoft/windows-rs", rev = "07f344c019b8fdae4d398d4c2591596044cb416a", default-features = false, features = [
     "std",
     "Data_Xml_Dom",

@@ -140,6 +140,7 @@ pub enum Action {
     BrightnessUp,
     BrightnessDown,
     TurnOff,
+    ToggleNightLight,
 }
 
 impl Action {

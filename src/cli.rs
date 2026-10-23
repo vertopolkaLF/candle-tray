@@ -32,6 +32,10 @@ pub enum Command {
     Input(u8, Selector),
     Show,
     InstallUpdate(String),
+    /// Switch Windows Night Light on or off; `None` toggles it.
+    NightLight(Option<bool>),
+    /// Windows Night Light strength, 0..=100.
+    NightLightStrength(u8),
 }
 
 fn position(value: &str) -> Result<usize> {
@@ -103,8 +107,18 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Command>> 
         let flag = flag.to_ascii_lowercase();
         let takes_value = match flag.as_str() {
             "--all" | "--off" | "--show" | "--list" | "--panel" | "--overlay" => false,
-            "--display" | "--monitornum" | "--monitorid" | "--set" | "--offset" | "--contrast"
-            | "--profile" | "--input" | "--actions" | "--vcp" => true,
+            "--display"
+            | "--monitornum"
+            | "--monitorid"
+            | "--set"
+            | "--offset"
+            | "--contrast"
+            | "--profile"
+            | "--input"
+            | "--actions"
+            | "--vcp"
+            | "--nightlight"
+            | "--nightlightstrength" => true,
             _ => bail!("unknown argument: {arg}"),
         };
         let value = if takes_value {
@@ -190,6 +204,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Command>> 
             "--input" => Command::Input(input(&value)?, Selector::All),
             "--off" => Command::Off,
             "--show" => Command::Show,
+            "--nightlight" => Command::NightLight(match value.to_ascii_lowercase().as_str() {
+                "on" => Some(true),
+                "off" => Some(false),
+                "toggle" => None,
+                _ => bail!("--NightLight takes on, off or toggle"),
+            }),
+            "--nightlightstrength" => Command::NightLightStrength(percent(&value)?),
             _ => unreachable!(),
         };
         ensure!(
@@ -611,6 +632,34 @@ mod tests {
             assert!(selector.resolve(&rows).is_err());
         }
         assert!(Selector::All.resolve(&[]).is_err());
+    }
+
+    #[test]
+    fn night_light_commands() {
+        assert_eq!(
+            parse_args(&["--NightLight=On"]).unwrap(),
+            Some(Command::NightLight(Some(true)))
+        );
+        assert_eq!(
+            parse_args(&["--nightlight", "off"]).unwrap(),
+            Some(Command::NightLight(Some(false)))
+        );
+        assert_eq!(
+            parse_args(&["--NightLight=toggle"]).unwrap(),
+            Some(Command::NightLight(None))
+        );
+        assert_eq!(
+            parse_args(&["--NightLightStrength=35"]).unwrap(),
+            Some(Command::NightLightStrength(35))
+        );
+        for args in [
+            vec!["--NightLight=maybe"],
+            vec!["--NightLightStrength=101"],
+            vec!["--NightLight=on", "--display=1"],
+            vec!["--NightLight=on", "--set=50"],
+        ] {
+            assert!(parse_args(&args).is_err(), "{args:?}");
+        }
     }
 
     #[test]

@@ -61,6 +61,11 @@ pub struct AppModel {
     foreground: Option<String>,
     /// Last reported power source (on battery); the first report only sets it.
     on_battery: Option<bool>,
+    /// Windows Night Light as last reported, `None` where it is unavailable.
+    pub night_light: Option<crate::night_light::NightLight>,
+    /// When the user last moved the Night Light strength, so reports of
+    /// earlier preview writes cannot drag the slider back mid-drag.
+    night_light_edited: Option<Instant>,
     service: Arc<MonitorService>,
     persist: PersistFn,
 }
@@ -82,6 +87,9 @@ struct FadeStep {
 
 /// Pause before turning displays off from a shortcut or the tray menu.
 const TURN_OFF_DELAY: Duration = Duration::from_millis(500);
+
+/// How long Night Light strength reports are ignored after a local edit.
+const NIGHT_LIGHT_ECHO: Duration = Duration::from_secs(1);
 
 /// One row the popup shows.
 #[derive(Clone, Debug)]
@@ -150,6 +158,8 @@ impl AppModel {
             on_battery: None,
             foreground: None,
             ambient_lux: None,
+            night_light: None,
+            night_light_edited: None,
             service,
             persist,
         }
@@ -470,6 +480,15 @@ impl AppModel {
             crate::popup::show_near_cursor();
             return;
         }
+        // Night Light does not wait for the display snapshot.
+        match command {
+            Cli::NightLight(Some(on)) => return self.set_night_light(on, cx),
+            Cli::NightLight(None) => return self.toggle_night_light(cx),
+            Cli::NightLightStrength(strength) => {
+                return self.set_night_light_strength(strength, cx);
+            }
+            _ => {}
+        }
         if !self.loaded {
             self.pending_cli.push(command);
             return;
@@ -507,7 +526,12 @@ impl AppModel {
                     self.turn_off(cx);
                     return Ok(());
                 }
-                Cli::Show | Cli::InstallUpdate(_) | Cli::WithFeedback(_, _) | Cli::List => {
+                Cli::Show
+                | Cli::InstallUpdate(_)
+                | Cli::WithFeedback(_, _)
+                | Cli::List
+                | Cli::NightLight(_)
+                | Cli::NightLightStrength(_) => {
                     unreachable!()
                 }
             };
@@ -720,6 +744,7 @@ impl AppModel {
             Action::BrightnessUp => self.step_all(step, cx),
             Action::BrightnessDown => self.step_all(-step, cx),
             Action::TurnOff => self.turn_off(cx),
+            Action::ToggleNightLight => self.toggle_night_light(cx),
         }
     }
 
@@ -917,6 +942,52 @@ impl AppModel {
             id: id.to_owned(),
             on,
         });
+    }
+
+    // ----- night light ------------------------------------------------------
+
+    pub fn on_night_light(
+        &mut self,
+        mut night_light: Option<crate::night_light::NightLight>,
+        cx: &mut Context<Self>,
+    ) {
+        if let (Some(new), Some(old)) = (night_light.as_mut(), self.night_light)
+            && self
+                .night_light_edited
+                .is_some_and(|edited| edited.elapsed() < NIGHT_LIGHT_ECHO)
+        {
+            new.strength = old.strength;
+        }
+        if self.night_light != night_light {
+            self.night_light = night_light;
+            cx.notify();
+        }
+    }
+
+    pub fn set_night_light(&mut self, on: bool, cx: &mut Context<Self>) {
+        crate::night_light::set_on(on);
+        if let Some(night_light) = self.night_light.as_mut() {
+            night_light.on = on;
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_night_light(&mut self, cx: &mut Context<Self>) {
+        crate::night_light::toggle();
+        if let Some(night_light) = self.night_light.as_mut() {
+            night_light.on = !night_light.on;
+        }
+        cx.notify();
+    }
+
+    pub fn set_night_light_strength(&mut self, strength: u8, cx: &mut Context<Self>) {
+        let strength = strength.min(100);
+        crate::night_light::set_strength(strength);
+        self.night_light_edited = Some(Instant::now());
+        if let Some(night_light) = self.night_light.as_mut() {
+            night_light.strength = strength;
+        }
+        cx.notify();
     }
 
     // ----- profiles ---------------------------------------------------------
@@ -2185,6 +2256,8 @@ mod tests {
             ambient_lux: None,
             foreground: None,
             on_battery: None,
+            night_light: None,
+            night_light_edited: None,
             service: Arc::new(service),
             persist: Arc::new(|_| {}),
         };

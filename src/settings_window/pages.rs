@@ -231,6 +231,16 @@ impl SettingsWindow {
                         this.edit(cx, move |settings| settings.restore_levels = value)
                     }),
                 ),
+                kit::toggle_row(
+                    k,
+                    "general-night-light",
+                    tr("settings-night-light"),
+                    Some(tr("settings-night-light-description")),
+                    s.show_night_light,
+                    Self::h(cx, |this, value: bool, _, cx| {
+                        this.edit(cx, move |settings| settings.show_night_light = value)
+                    }),
+                ),
                 kit::dropdown_row(
                     k,
                     "general-interval",

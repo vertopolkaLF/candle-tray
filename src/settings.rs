@@ -152,6 +152,8 @@ pub struct Shortcuts {
     pub brightness_down: Option<crate::hotkey::Hotkey>,
     /// Turn the displays off the way [`Settings::turn_off`] says.
     pub turn_off: Option<crate::hotkey::Hotkey>,
+    /// Turn Windows Night Light on or off.
+    pub night_light: Option<crate::hotkey::Hotkey>,
 }
 
 /// Dim the displays after a while without keyboard or mouse input.
@@ -547,6 +549,8 @@ pub struct Settings {
     pub adaptive: AdaptiveBrightness,
     /// Look for a new release at startup and every hour.
     pub check_for_updates: bool,
+    /// Windows Night Light switch and strength at the end of the popup.
+    pub show_night_light: bool,
 }
 
 impl Default for Settings {
@@ -582,6 +586,7 @@ impl Default for Settings {
             triggers: Vec::new(),
             adaptive: AdaptiveBrightness::default(),
             check_for_updates: true,
+            show_night_light: true,
         }
     }
 }
@@ -693,6 +698,7 @@ impl Settings {
             (Action::BrightnessUp, self.shortcuts.brightness_up),
             (Action::BrightnessDown, self.shortcuts.brightness_down),
             (Action::TurnOff, self.shortcuts.turn_off),
+            (Action::ToggleNightLight, self.shortcuts.night_light),
         ]);
         hotkeys.extend(
             self.action_shortcuts
@@ -714,6 +720,7 @@ impl Settings {
             (Action::BrightnessUp, &mut self.shortcuts.brightness_up),
             (Action::BrightnessDown, &mut self.shortcuts.brightness_down),
             (Action::TurnOff, &mut self.shortcuts.turn_off),
+            (Action::ToggleNightLight, &mut self.shortcuts.night_light),
         ]);
         hotkeys.extend(
             self.action_shortcuts

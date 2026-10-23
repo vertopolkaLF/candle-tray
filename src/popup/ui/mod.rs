@@ -337,6 +337,9 @@ fn handle_command(
         PopupCommand::AmbientLight { lux } => {
             let _ = model.update(cx, |model, cx| model.on_ambient_light(lux, cx));
         }
+        PopupCommand::NightLight(night_light) => {
+            let _ = model.update(cx, |model, cx| model.on_night_light(night_light, cx));
+        }
         PopupCommand::Run(job) => {
             let _ = cx.update(|cx| job(cx));
         }

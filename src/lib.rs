@@ -12,6 +12,7 @@ pub mod light_sensor;
 pub mod location;
 pub mod logger;
 pub mod monitors;
+pub mod night_light;
 pub mod notifications;
 pub mod popup;
 pub mod schedule;
