@@ -116,6 +116,8 @@ fn source(name: &str) -> Option<&'static str> {
         "gear-six-fill" => include_str!("../../../assets/icons/ph-gear-six-fill.svg"),
         "keyboard-fill" => include_str!("../../../assets/icons/ph-keyboard-fill.svg"),
         "clock-fill" => include_str!("../../../assets/icons/ph-clock-fill.svg"),
+        "file-text-fill" => include_str!("../../../assets/icons/ph-file-text-fill.svg"),
+        "folder-open-fill" => include_str!("../../../assets/icons/ph-folder-open-fill.svg"),
         "monitor-fill" => include_str!("../../../assets/icons/ph-monitor-fill.svg"),
         "laptop-fill" => include_str!("../../../assets/icons/ph-laptop-fill.svg"),
         "arrow-counter-clockwise-bold" => {

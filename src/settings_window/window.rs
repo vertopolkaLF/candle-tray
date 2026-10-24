@@ -6,7 +6,8 @@ use std::time::Duration;
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
     KeyDownEvent, ParentElement, Render, ScrollHandle, ScrollWheelEvent, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Window, WindowControlArea, div, point, px,
+    StatefulInteractiveElement, Styled, Subscription, Task, Window, WindowControlArea, div, point,
+    px,
 };
 
 use super::input::{HasInputs, InputEvent, Inputs, TextInput};
@@ -29,16 +30,18 @@ pub(super) enum Tab {
     Profiles,
     Shortcuts,
     Automation,
+    Log,
     About,
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [
+    const ALL: [Tab; 7] = [
         Tab::General,
         Tab::Monitors,
         Tab::Profiles,
         Tab::Shortcuts,
         Tab::Automation,
+        Tab::Log,
         Tab::About,
     ];
 
@@ -49,6 +52,7 @@ impl Tab {
             Tab::Profiles => crate::i18n::tr("settings-profiles"),
             Tab::Shortcuts => crate::i18n::tr("settings-shortcuts"),
             Tab::Automation => crate::i18n::tr("settings-automation"),
+            Tab::Log => crate::i18n::tr("settings-log"),
             Tab::About => crate::i18n::tr("settings-about"),
         }
     }
@@ -60,6 +64,7 @@ impl Tab {
             Tab::Profiles => "sliders-horizontal-fill",
             Tab::Shortcuts => "keyboard-fill",
             Tab::Automation => "clock-fill",
+            Tab::Log => "file-text-fill",
             Tab::About => "info-fill",
         }
     }
@@ -71,6 +76,7 @@ impl Tab {
             Tab::Profiles => "profiles",
             Tab::Shortcuts => "shortcuts",
             Tab::Automation => "automation",
+            Tab::Log => "log",
             Tab::About => "about",
         }
     }
@@ -97,6 +103,11 @@ pub(crate) struct SettingsWindow {
     pub(super) hotkey_rejected: bool,
     /// Location detection is running.
     pub(super) locating: bool,
+    /// Live tail of log.txt, re-read while the Log page is shown.
+    pub(super) log: SharedString,
+    pub(super) log_length: Option<u64>,
+    pub(super) log_scroll: ScrollHandle,
+    _log_poll: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -139,6 +150,21 @@ impl SettingsWindow {
         });
         let focus = cx.focus_handle();
         window.focus(&focus);
+        let log_poll = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                let alive = this.update(cx, |this, cx| {
+                    if this.tab == Tab::Log && this.refresh_log(false) {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        });
         Self {
             model,
             kit: Kit::default(),
@@ -155,6 +181,10 @@ impl SettingsWindow {
             hotkey_recording: None,
             hotkey_rejected: false,
             locating: false,
+            log: SharedString::default(),
+            log_length: None,
+            log_scroll: ScrollHandle::new(),
+            _log_poll: log_poll,
             _subscriptions: subscriptions,
         }
     }
@@ -240,6 +270,9 @@ impl SettingsWindow {
             crate::light_sensor::refresh_availability();
         }
         self.stop_hotkey_recording();
+        if tab == Tab::Log {
+            self.refresh_log(true);
+        }
         let from = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
         let to = Tab::ALL.iter().position(|t| *t == tab).unwrap_or(0);
         self.nav_slide = if to > from { 1.0 } else { -1.0 };
@@ -417,6 +450,7 @@ impl SettingsWindow {
             Tab::Profiles => self.profiles_page(k, window, cx),
             Tab::Shortcuts => self.shortcuts_page(k, window, cx),
             Tab::Automation => self.automation_page(k, window, cx),
+            Tab::Log => self.log_page(k, cx),
             Tab::About => self.about_page(k, cx),
         });
         let body = div()

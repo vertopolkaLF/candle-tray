@@ -226,6 +226,11 @@ impl AppModel {
                 }
             }
             Event::Snapshot { monitors, reason } => {
+                log(format!(
+                    "Snapshot {reason:?} with {} display(s), first={}",
+                    monitors.len(),
+                    !self.loaded
+                ));
                 // A fresh read after unlock repairs optimistic values whose
                 // queued writes were discarded while the session was paused.
                 let reason = if self.session_refresh_pending && reason == SnapshotReason::Requested
@@ -264,9 +269,16 @@ impl AppModel {
                         .into_iter()
                         .filter(|target| self.display_selected(&target.id))
                         .collect::<Vec<_>>();
+                    log_restore(&reason, &targets);
                     if !targets.is_empty() {
                         self.service.send(Command::Apply(targets));
                     }
+                } else if self.settings.restore_levels {
+                    log(format!(
+                        "Restore after {reason:?} skipped: blocked={} idle_dimmed={:?}",
+                        self.automatic.blocked(&self.settings),
+                        self.idle_dimmed
+                    ));
                 }
                 // An app trigger seen before the displays were known applies
                 // now, before the schedule (which waits while it holds).
@@ -515,6 +527,10 @@ impl AppModel {
         if command == Cli::List {
             return;
         }
+        log(format!(
+            "CLI: {command:?} (displays loaded: {})",
+            self.loaded
+        ));
         if let Cli::WithFeedback(command, feedback) = command {
             if !self.loaded && *command != Cli::Show {
                 self.pending_cli.push(Cli::WithFeedback(command, feedback));
@@ -644,6 +660,10 @@ impl AppModel {
                 Err(error) => crate::logger::error(format!("Action skipped: {error:#}")),
             }
         }
+        log(format!(
+            "Actions {actions:?} resolved to {} write(s)",
+            writes.len()
+        ));
         if !writes.is_empty() {
             self.interrupt_automation();
             self.service.send(Command::Execute(writes, Instant::now()));
@@ -752,6 +772,7 @@ impl AppModel {
     /// instead of queueing one ordered action each, so the indicator shows
     /// the new level at once rather than waiting for the hardware.
     pub fn step_all(&mut self, delta: i32, cx: &mut Context<Self>) {
+        log(format!("Step every display by {delta}"));
         self.interrupt_automation();
         let osd = self.osd_until.is_some_and(|until| Instant::now() < until);
         for id in self.controllable_ids() {
@@ -774,6 +795,10 @@ impl AppModel {
 
     /// The wheel turned over the tray icon.
     pub fn scroll_all(&mut self, notches: i32, cx: &mut Context<Self>) {
+        log(format!(
+            "Tray wheel: {notches} notch(es), enabled={}",
+            self.settings.tray_scroll
+        ));
         if self.settings.tray_scroll {
             if self.settings.show_osd {
                 self.request_osd();
@@ -791,6 +816,7 @@ impl AppModel {
 
     /// A global shortcut was pressed.
     pub fn run_shortcut(&mut self, action: Action, cx: &mut Context<Self>) {
+        log(format!("Shortcut: {action:?}"));
         if self.settings.show_osd {
             self.request_osd();
         }
@@ -815,6 +841,9 @@ impl AppModel {
     pub fn turn_off(&mut self, cx: &mut Context<Self>) {
         let mode = self.settings.turn_off;
         let power_off = self.settings.ddc_power_off;
+        log(format!(
+            "Turn off displays ({mode:?}, DDC power mode {power_off})"
+        ));
         let service = Arc::clone(&self.service);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TURN_OFF_DELAY).await;
@@ -857,6 +886,10 @@ impl AppModel {
 
     /// Switch a display to another input (DDC/CI VCP 0x60).
     pub fn set_input(&mut self, id: &str, value: u8, cx: &mut Context<Self>) {
+        log(format!(
+            "Input of {id} -> {}",
+            crate::monitors::input_label(value)
+        ));
         if let Some(monitor) = self.monitors.iter_mut().find(|m| m.id == id) {
             monitor.input = Some(value);
         }
@@ -977,6 +1010,10 @@ impl AppModel {
 
     /// Switch one display on or off through DDC/CI.
     pub fn set_power(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+        log(format!(
+            "Power of {id} -> {}",
+            if on { "on" } else { "off" }
+        ));
         let mode = self.settings.ddc_power_off;
         let mut actions = vec![crate::actions::Action {
             selector: crate::cli::Selector::Id(id.to_owned()),
@@ -999,6 +1036,7 @@ impl AppModel {
 
     /// Switch HDR on or off for one display.
     pub fn set_hdr(&mut self, id: &str, on: bool) {
+        log(format!("HDR of {id} -> {}", if on { "on" } else { "off" }));
         self.service.send(Command::SetHdr {
             id: id.to_owned(),
             on,
@@ -1026,6 +1064,7 @@ impl AppModel {
     }
 
     pub fn set_night_light(&mut self, on: bool, cx: &mut Context<Self>) {
+        log(format!("Night Light -> {}", if on { "on" } else { "off" }));
         crate::night_light::set_on(on);
         if let Some(night_light) = self.night_light.as_mut() {
             night_light.on = on;
@@ -1034,6 +1073,7 @@ impl AppModel {
     }
 
     pub fn toggle_night_light(&mut self, cx: &mut Context<Self>) {
+        log("Night Light toggled");
         crate::night_light::toggle();
         if let Some(night_light) = self.night_light.as_mut() {
             night_light.on = !night_light.on;
@@ -1043,6 +1083,7 @@ impl AppModel {
 
     pub fn set_night_light_strength(&mut self, strength: u8, cx: &mut Context<Self>) {
         let strength = strength.min(100);
+        log(format!("Night Light strength -> {strength}"));
         crate::night_light::set_strength(strength);
         self.night_light_edited = Some(Instant::now());
         if let Some(night_light) = self.night_light.as_mut() {
@@ -1101,8 +1142,14 @@ impl AppModel {
     /// Apply a profile to the connected displays it knows.
     pub fn apply_profile(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(profile) = self.settings.profiles.get(index) else {
+            log(format!("Profile {index} does not exist"));
             return;
         };
+        log(format!(
+            "Applying profile {index} \"{}\": {:?}",
+            self.profile_name(index),
+            profile.levels
+        ));
         use crate::actions::{Action as MonitorAction, Control, Operation};
         let mut actions = Vec::new();
         for (id, saved) in &profile.levels {
@@ -1251,6 +1298,7 @@ impl AppModel {
     }
 
     pub fn refresh(&self) {
+        log("Refresh requested");
         self.service.send(Command::Refresh);
     }
 
@@ -1263,6 +1311,7 @@ impl AppModel {
     pub fn edit(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Settings)) {
         let before = self.settings.clone();
         change(&mut self.settings);
+        log_settings_change(&before, &self.settings);
         self.apply_runtime_effects(&before);
         self.automation_changed(&before, cx);
         self.save();
@@ -1272,6 +1321,8 @@ impl AppModel {
     /// Settings were replaced from outside this model (import).
     pub fn replace_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
         let before = std::mem::replace(&mut self.settings, settings);
+        log("Settings replaced");
+        log_settings_change(&before, &self.settings);
         self.apply_runtime_effects(&before);
         self.automation_changed(&before, cx);
         self.save();
@@ -1286,6 +1337,7 @@ impl AppModel {
 
     /// Explicitly return ownership after a manual brightness/profile edit.
     pub fn resume_automation(&mut self, cx: &mut Context<Self>) {
+        log("Automation resumed by the user");
         self.automatic.manual = false;
         if !self.automatic.blocked(&self.settings) {
             self.reconcile_active_trigger(cx);
@@ -1298,6 +1350,10 @@ impl AppModel {
     }
 
     pub fn on_session_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
+        log(format!(
+            "Session {}",
+            if locked { "locked" } else { "unlocked" }
+        ));
         let was = self.automatic.blocked(&self.settings);
         self.automatic.locked = locked;
         if was != self.automatic.blocked(&self.settings) {
@@ -1306,6 +1362,10 @@ impl AppModel {
     }
 
     pub fn on_suspend(&mut self, suspended: bool, cx: &mut Context<Self>) {
+        log(format!(
+            "System {}",
+            if suspended { "suspending" } else { "resumed" }
+        ));
         let was = self.automatic.blocked(&self.settings);
         self.automatic.suspended = suspended;
         self.suspended_at = suspended.then(std::time::SystemTime::now);
@@ -1315,6 +1375,7 @@ impl AppModel {
     }
 
     pub fn on_lid_closed(&mut self, closed: bool, cx: &mut Context<Self>) {
+        log(format!("Lid {}", if closed { "closed" } else { "opened" }));
         self.lid_closed = closed;
         // A fade must not retain a closed panel as a write target.
         if self.settings.hide_closed_lid {
@@ -1380,6 +1441,12 @@ impl AppModel {
     }
 
     fn reconcile_session(&mut self, cx: &mut Context<Self>) {
+        log(format!(
+            "Session state changed: locked={} suspended={} blocked={}",
+            self.automatic.locked,
+            self.automatic.suspended,
+            self.automatic.blocked(&self.settings)
+        ));
         // Unlock recomputes ownership while preserving the fade destination.
         self.stop_automatic_writes();
         if !self.automatic.blocked(&self.settings) && self.loaded {
@@ -1391,6 +1458,7 @@ impl AppModel {
                         .into_iter()
                         .filter(|target| self.display_selected(&target.id))
                         .collect::<Vec<_>>();
+                log_restore(&SnapshotReason::Resumed, &targets);
                 if !targets.is_empty() {
                     self.service.send(Command::Apply(targets));
                 }
@@ -1546,7 +1614,10 @@ impl AppModel {
                 dimmed.push(id);
             }
         }
-        crate::logger::info(format!("Idle: dimmed {} displays", dimmed.len()));
+        log(format!(
+            "Idle for {} s: dimmed {dimmed:?} to {level}",
+            idle.as_secs()
+        ));
         self.idle_dimmed = Some(dimmed);
         true
     }
@@ -1557,7 +1628,9 @@ impl AppModel {
         // dimmed by us and must come back.
         let restoring = std::mem::replace(&mut self.restoring, false);
         for id in self.idle_dimmed.take().unwrap_or_default() {
-            if let Some(slider) = self.settings.monitor(&id).last_brightness {
+            let slider = self.settings.monitor(&id).last_brightness;
+            log(format!("Idle: waking {id} to {slider:?}"));
+            if let Some(slider) = slider {
                 self.write_level(&id, slider);
             }
         }
@@ -1566,6 +1639,9 @@ impl AppModel {
 
     /// The user took over: stop fading and leave idle dimming.
     fn interrupt_automation(&mut self) {
+        if !self.automatic.manual {
+            log("Manual change: automation paused");
+        }
         self.automatic.manual = true;
         self.freeze_fade();
         if self.automatic.blocked(&self.settings) {
@@ -1579,6 +1655,9 @@ impl AppModel {
 
     /// Another app came to the foreground (`exe` like `game.exe`).
     pub fn on_foreground(&mut self, exe: &str, cx: &mut Context<Self>) {
+        if self.foreground.as_deref() != Some(exe) {
+            log(format!("Foreground app: {exe}"));
+        }
         self.foreground = Some(exe.to_owned());
         // Applied with the first snapshot, once the displays are known.
         if !self.loaded || self.automatic.blocked(&self.settings) {
@@ -1700,6 +1779,10 @@ impl AppModel {
 
     /// The computer switched between battery and mains power.
     pub fn on_power_source(&mut self, on_battery: bool, cx: &mut Context<Self>) {
+        log(format!(
+            "Power source: {}",
+            if on_battery { "battery" } else { "mains" }
+        ));
         if self.apply_power_source(on_battery) {
             if let Some(exe) = self.foreground.clone() {
                 self.on_foreground(&exe, cx);
@@ -1775,6 +1858,7 @@ impl AppModel {
     }
 
     fn restore_levels(&mut self, levels: &BTreeMap<String, ProfileLevels>) {
+        log(format!("Restoring remembered levels {levels:?}"));
         let connected = self.controllable_ids();
         for (id, saved) in levels {
             if !connected.contains(id) {
@@ -1936,6 +2020,14 @@ impl AppModel {
             }
         }
         if !steps.is_empty() {
+            log(format!(
+                "Fading over {} s: {:?}",
+                fade.as_secs(),
+                steps
+                    .iter()
+                    .map(|step| format!("{} {}->{}", step.id, step.from, step.to))
+                    .collect::<Vec<_>>()
+            ));
             self.fade = Some(Fade {
                 started: Instant::now(),
                 duration: fade,
@@ -2175,6 +2267,57 @@ impl AppModel {
 
 /// The value of a display's level slider: its SDR white level while HDR is
 /// on, its normalized hardware brightness otherwise.
+fn log(message: impl AsRef<str>) {
+    crate::logger::info(format!("[app] {}", message.as_ref()));
+}
+
+fn log_restore(reason: &SnapshotReason, targets: &[crate::monitors::LevelTarget]) {
+    if targets.is_empty() {
+        log(format!(
+            "Restore after {reason:?}: every display already matches"
+        ));
+    }
+    for target in targets {
+        log(format!(
+            "Restore after {reason:?}: {} brightness={:?} sdr={:?} contrast={:?}",
+            target.id, target.brightness, target.sdr, target.contrast
+        ));
+    }
+}
+
+/// Logs the settings lines an edit added or removed.
+fn log_settings_change(before: &Settings, after: &Settings) {
+    if before == after {
+        return;
+    }
+    let (Ok(old), Ok(new)) = (toml::to_string(before), toml::to_string(after)) else {
+        log("Settings changed");
+        return;
+    };
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let mut section = "";
+    let mut changes = Vec::new();
+    for line in &new_lines {
+        if line.starts_with('[') {
+            section = line;
+        } else if !old_lines.contains(line) {
+            changes.push(format!("{section} + {line}"));
+        }
+    }
+    section = "";
+    for line in &old_lines {
+        if line.starts_with('[') {
+            section = line;
+        } else if !new_lines.contains(line) {
+            changes.push(format!("{section} - {line}"));
+        }
+    }
+    for change in changes {
+        log(format!("Setting: {}", change.trim()));
+    }
+}
+
 fn slider_level(monitor: &Monitor, settings: &MonitorSettings) -> Option<u8> {
     match monitor
         .sdr

@@ -294,6 +294,10 @@ impl Registration {
                     {
                         self.registered.push(id);
                         ids.actions.insert(id, *action);
+                        crate::logger::info(format!(
+                            "Shortcut {} registered for {action:?}",
+                            hotkey.label()
+                        ));
                         Status::Active
                     } else {
                         crate::logger::info(format!(

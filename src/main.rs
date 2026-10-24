@@ -115,6 +115,7 @@ fn run() -> Result<()> {
     if let Err(error) = store.flush() {
         logger::error(format!("could not save settings on exit: {error:#}"));
     }
+    logger::info("Candle Tray exited");
     drop(instance);
     result
 }

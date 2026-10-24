@@ -11,6 +11,7 @@ mod backdrop;
 pub(crate) mod input;
 #[allow(dead_code)]
 pub(crate) mod kit;
+mod log;
 mod monitor_features;
 mod pages;
 mod profiles;

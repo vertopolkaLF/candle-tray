@@ -200,6 +200,7 @@ pub fn show_near(anchor_x: i32, anchor_y: i32) {
 }
 
 fn show(anchor_x: i32, anchor_y: i32) {
+    crate::logger::info(format!("[popup] Show near {anchor_x},{anchor_y}"));
     // Optimistic: the tray bridge reads this flag before the GPUI thread has
     // processed the command, and a second tray click must toggle it closed.
     POPUP_VISIBLE.store(true, Ordering::SeqCst);
@@ -227,6 +228,7 @@ pub fn hide() {
         return;
     }
     POPUP_CLOSING.store(true, Ordering::SeqCst);
+    crate::logger::info("[popup] Hide");
     send_command(PopupCommand::Hide);
 }
 

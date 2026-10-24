@@ -455,7 +455,12 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
         let mut applied = None;
         match request.work {
             Work::Probe(target, targets, brightness_vcp) => {
+                let started = Instant::now();
                 let mut target = *target;
+                log(format!(
+                    "Probing {} on {} (brightness VCP override {brightness_vcp:?})",
+                    target.monitor.device_path, target.source
+                ));
                 // Releasing/reacquiring handles stays on this worker, behind any
                 // previous call. Never close a handle still executing in a driver.
                 // A re-probe cannot read back the power state; keep what the
@@ -500,6 +505,11 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                 };
                 target.monitor.hdr_supported = hdr::supported(&target);
                 target.monitor.sdr = hdr::read(&target);
+                log(format!(
+                    "Probed in {} ms: {}",
+                    started.elapsed().as_millis(),
+                    describe(&target.monitor)
+                ));
                 state = Some(Handles {
                     target,
                     ddc,
@@ -536,6 +546,17 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                         .flatten()
                         .map(|(current, _)| (current & 0xff) as u8)
                         .filter(|value| *value != 0);
+                    log(format!(
+                        "Capabilities: power={} inputs={:?} current_input={:?} vcp={:02X?}",
+                        monitor.supports_ddc_power,
+                        monitor
+                            .inputs
+                            .iter()
+                            .map(|value| input_label(*value))
+                            .collect::<Vec<_>>(),
+                        monitor.input.map(input_label),
+                        monitor.vcp_codes
+                    ));
                 }
             }
             Work::Read => {
@@ -576,12 +597,22 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                     if h.target.monitor.sdr.is_some() {
                         h.target.monitor.sdr = hdr::read(&h.target).or(h.target.monitor.sdr);
                     }
+                    log(format!("Read levels: {}", describe(&h.target.monitor)));
                 }
             }
             Work::Action(write, issued) => {
                 if let Some(h) = &mut state {
+                    log(format!(
+                        "Action {:?} {:?} (range {}..{})",
+                        write.control, write.operation, write.min, write.max
+                    ));
                     match execute_action(h, &write) {
                         Ok((brightness, contrast)) => {
+                            log(format!(
+                                "Action applied: slider brightness={brightness:?} \
+                                 contrast={contrast:?}; {}",
+                                describe(&h.target.monitor)
+                            ));
                             applied = Some((brightness, contrast, issued, write.control))
                         }
                         Err(error) => log(format!(
@@ -595,6 +626,7 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                 if let Some(h) = &mut state {
                     match &h.ddc {
                         Some(ddc) if ddc.set(0xd6, if on { 1 } else { 4 }) => {
+                            log(format!("DDC power {}", if on { "on" } else { "off" }));
                             h.target.monitor.powered_off = !on;
                             h.power_mode = if on { 1 } else { 4 };
                         }
@@ -608,6 +640,7 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                     // failed acknowledgement is only logged.
                     match &h.ddc {
                         Some(ddc) if ddc.set(INPUT, u32::from(value)) => {
+                            log(format!("Input switched to {}", input_label(value)));
                             h.target.monitor.input = Some(value);
                         }
                         _ => log(format!(
@@ -621,6 +654,11 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
                 if let Some(h) = &mut state {
                     if hdr::enable(&h.target, on) {
                         h.target.monitor.sdr = hdr::read(&h.target);
+                        log(format!(
+                            "HDR switched {}; SDR level {:?}",
+                            if on { "on" } else { "off" },
+                            h.target.monitor.sdr.map(|sdr| sdr.percent)
+                        ));
                     } else {
                         log(format!("HDR switch failed: {}", h.target.monitor.id));
                     }
@@ -629,7 +667,14 @@ fn worker(receiver: Receiver<Request>, sender: Sender<Reply>) {
             Work::Write(level, percent) => {
                 if let Some(h) = &mut state {
                     h.slider = None;
-                    if !write_level(h, level, percent) {
+                    let started = Instant::now();
+                    let written = write_level(h, level, percent);
+                    log(format!(
+                        "Write {level:?} = {percent}% {} in {} ms",
+                        if written { "ok" } else { "FAILED" },
+                        started.elapsed().as_millis()
+                    ));
+                    if !written {
                         if level == Level::Brightness {
                             h.target.monitor.brightness = None;
                         }
@@ -690,7 +735,6 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
             events::turn_off();
         }
         for reason in events::Events::pump() {
-            log(format!("Hardware event: {reason:?}"));
             let reason = if debounce
                 .as_ref()
                 .is_some_and(|(_, r)| *r == SnapshotReason::Resumed)
@@ -706,6 +750,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
             .is_some_and(|(at, _)| Instant::now() >= *at)
         {
             refresh = debounce.take().map(|(_, r)| r);
+            log(format!("Hardware change settled; refreshing ({refresh:?})"));
         }
         // Bound each drain so continuous slider input cannot starve deadlines.
         for _ in 0..256 {
@@ -714,16 +759,29 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 None => commands.try_recv(),
             };
             match next {
-                Ok(Command::Shutdown) | Err(mpsc::TryRecvError::Disconnected) => return,
+                Ok(Command::Shutdown) | Err(mpsc::TryRecvError::Disconnected) => {
+                    log("Monitor service shutting down");
+                    return;
+                }
                 Err(mpsc::TryRecvError::Empty) => break,
-                Ok(Command::Refresh) => refresh = Some(SnapshotReason::Requested),
+                Ok(Command::Refresh) => {
+                    log("Refresh requested");
+                    refresh = Some(SnapshotReason::Requested);
+                }
                 Ok(Command::ConfigureFeatures { id, codes }) => {
+                    log(format!("Extra VCP features of {id}: {codes:02X?}"));
                     feature_codes.insert(id.clone(), codes.clone());
                     if let Some(slot) = slots.get_mut(&id) {
                         slot.features = Some(codes);
                     }
                 }
                 Ok(Command::Execute(writes, issued)) => {
+                    for (id, write) in &writes {
+                        log(format!(
+                            "Execute on {id}: {:?} {:?}",
+                            write.control, write.operation
+                        ));
+                    }
                     for (id, write) in writes {
                         if let Some(slot) = slots
                             .get_mut(&id)
@@ -734,6 +792,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                     }
                 }
                 Ok(Command::ReadLevels) => {
+                    log("Reading levels of every display");
                     // A display in DPM off may not answer; a pending probe
                     // reads levels anyway.
                     for s in slots
@@ -743,15 +802,26 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                         s.read = true;
                     }
                 }
-                Ok(Command::ReadInventory) => inventory_requested = true,
-                Ok(Command::SetThrottle(value)) => throttle = value,
+                Ok(Command::ReadInventory) => {
+                    log("Inventory requested");
+                    inventory_requested = true;
+                }
+                Ok(Command::SetThrottle(value)) => {
+                    log(format!("Write interval {} ms", value.as_millis()));
+                    throttle = value;
+                }
                 Ok(Command::DiscardPendingLevels) => {
+                    log("Discarding queued writes of every display");
                     for slot in slots.values_mut() {
                         slot.discard_pending();
                     }
                 }
-                Ok(Command::DiscardPendingFor(ids)) => discard_pending_for(&mut slots, &ids),
+                Ok(Command::DiscardPendingFor(ids)) => {
+                    log(format!("Discarding queued writes of {ids:?}"));
+                    discard_pending_for(&mut slots, &ids);
+                }
                 Ok(Command::SetBrightnessVcp { id, vcp }) => {
+                    log(format!("Brightness VCP override of {id}: {vcp:02X?}"));
                     set_brightness_vcp(&mut brightness_vcps, &mut slots, id, vcp);
                 }
                 Ok(Command::SetBrightness { id, percent }) => {
@@ -782,6 +852,12 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                     }
                 }
                 Ok(Command::Apply(targets)) => {
+                    for t in &targets {
+                        log(format!(
+                            "Apply to {}: brightness={:?} sdr={:?} contrast={:?}",
+                            t.id, t.brightness, t.sdr, t.contrast
+                        ));
+                    }
                     for t in targets {
                         if let Some(s) = slots.get_mut(&t.id).filter(|s| s.active) {
                             if let Some(p) = t.brightness {
@@ -831,6 +907,9 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 continue;
             }
             slot.busy = None;
+            if slot.monitor.unresponsive {
+                log(format!("{} answered again", reply.id));
+            }
             slot.monitor = reply.monitor;
             slot.monitor.unresponsive = false;
             if slot.refresh.is_none() {
@@ -856,6 +935,21 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
             }
             match enumerate::enumerate() {
                 Ok(targets) => {
+                    log(format!(
+                        "Enumerated {} display(s) ({reasons:?})",
+                        targets.len()
+                    ));
+                    for target in &targets {
+                        log(format!(
+                            "  {} on {}: {}",
+                            target.monitor.id, target.source, target.monitor.device_path
+                        ));
+                    }
+                    for id in slots.keys() {
+                        if !targets.iter().any(|t| t.monitor.id == *id) {
+                            log(format!("  {id} disconnected"));
+                        }
+                    }
                     let targets = Arc::new(targets);
                     // Keep disconnected busy workers parked until they finish, so
                     // reconnect/refresh cannot accumulate uncancellable driver calls.
@@ -1004,6 +1098,10 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 .all(|id| slots.get(id).is_none_or(|s| !s.awaiting_probe))
         }) {
             let ids = snapshot.take().expect("pending snapshot");
+            log(format!("Snapshot ready ({reasons:?}):"));
+            for monitor in sorted(&slots, Some(&ids)) {
+                log(format!("  {}", describe(&monitor)));
+            }
             for reason in reasons.drain(..) {
                 callback(Event::Snapshot {
                     monitors: sorted(&slots, Some(&ids)),
@@ -1019,6 +1117,7 @@ fn coordinator(commands: Receiver<Command>, callback: Arc<dyn Fn(Event) + Send +
                 .all(Slot::inventory_ready)
         {
             inventory_requested = false;
+            log("Inventory ready");
             callback(Event::Inventory(sorted(&slots, None)));
         }
         slots.retain(|_, slot| slot.active || slot.busy.is_some());

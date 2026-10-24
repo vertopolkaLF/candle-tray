@@ -38,8 +38,45 @@ mod rules;
 mod service;
 #[cfg(windows)]
 mod wmi;
+/// Worker threads are named `monitor-<id>`, so their lines carry the display.
 fn log(message: impl std::fmt::Display) {
-    crate::logger::info(format!("[monitors] {message}"));
+    let thread = std::thread::current();
+    match thread.name().and_then(|name| name.strip_prefix("monitor-")) {
+        Some(id) => crate::logger::info(format!("[monitors:{id}] {message}")),
+        None => crate::logger::info(format!("[monitors] {message}")),
+    }
+}
+
+/// One-line summary of a display for the log.
+fn describe(monitor: &Monitor) -> String {
+    let mut line = format!(
+        "{} \"{}\" model={} #{} {:?} {:?}",
+        monitor.id, monitor.name, monitor.model, monitor.num, monitor.kind, monitor.backend
+    );
+    let level = |value: Option<u8>| value.map_or("-".to_owned(), |v| v.to_string());
+    line.push_str(&format!(
+        " brightness={} contrast={} sdr={} hdr_supported={}",
+        level(monitor.brightness),
+        level(monitor.contrast),
+        level(monitor.sdr.map(|sdr| sdr.percent)),
+        monitor.hdr_supported
+    ));
+    if let Some(bounds) = monitor.bounds {
+        line.push_str(&format!(
+            " bounds={}x{}@{},{}",
+            bounds.width, bounds.height, bounds.x, bounds.y
+        ));
+    }
+    if let Some(input) = monitor.input {
+        line.push_str(&format!(" input={}", input_label(input)));
+    }
+    if monitor.powered_off {
+        line.push_str(" powered_off");
+    }
+    if monitor.unresponsive {
+        line.push_str(" unresponsive");
+    }
+    line
 }
 
 /// Stable per-display key (device path instance, legacy `hwid[2]`).

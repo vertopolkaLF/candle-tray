@@ -235,6 +235,7 @@ pub fn run(on_refresh: impl Fn(), on_exit: impl FnOnce()) -> Result<()> {
             popup::send_command(PopupCommand::TrayScroll(notches));
         }
         while let Ok(event) = MenuEvent::receiver().try_recv() {
+            crate::logger::info(format!("[tray] Menu: {}", event.id.as_ref()));
             match event.id.as_ref() {
                 MENU_REFRESH => on_refresh(),
                 MENU_SETTINGS => popup::send_command(PopupCommand::OpenSettings),

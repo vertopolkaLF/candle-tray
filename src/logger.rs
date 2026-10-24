@@ -3,7 +3,7 @@
 use std::{
     collections::VecDeque,
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -146,12 +146,16 @@ pub fn info(message: impl AsRef<str>) {
     }
 }
 
+/// Bytes read from the end of the log for the live tail; a long session
+/// can grow to megabytes, and the Settings page polls twice a second.
+const TAIL_BYTES: u64 = 256 * 1024;
+
 /// Reads only the requested tail, keeping the UI responsive even after a long run.
 pub fn tail_lines(max_lines: usize) -> Result<String> {
     let Some(path) = path() else {
         return Ok("Log is not initialized yet.".into());
     };
-    let file = match fs::File::open(path) {
+    let mut file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
         Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
@@ -159,15 +163,49 @@ pub fn tail_lines(max_lines: usize) -> Result<String> {
     if max_lines == 0 {
         return Ok(String::new());
     }
-    let mut lines = VecDeque::with_capacity(max_lines);
-    for line in BufReader::new(file).lines() {
-        let line = line.with_context(|| format!("read {}", path.display()))?;
-        if lines.len() == max_lines {
-            lines.pop_front();
-        }
-        lines.push_back(line);
+    let length = file
+        .metadata()
+        .with_context(|| format!("read {}", path.display()))?
+        .len();
+    let skip = length.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(skip))
+        .with_context(|| format!("read {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("read {}", path.display()))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    // A read that starts mid-file begins inside a line.
+    if skip > 0 {
+        lines.next();
     }
-    Ok(lines.into_iter().collect::<Vec<_>>().join("\n"))
+    let mut tail = VecDeque::with_capacity(max_lines);
+    for line in lines {
+        if tail.len() == max_lines {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+    Ok(tail.into_iter().collect::<Vec<_>>().join("\n"))
+}
+
+/// Size of the current log, used to skip re-reading an unchanged file.
+pub fn len() -> Option<u64> {
+    fs::metadata(path()?).ok().map(|metadata| metadata.len())
+}
+
+/// Opens `log.txt` in the default text editor.
+pub fn open() {
+    if let Some(path) = path() {
+        crate::updater::open_url(&path.to_string_lossy());
+    }
+}
+
+/// Opens the folder with the current and archived logs.
+pub fn open_folder() {
+    if let Some(directory) = path().and_then(Path::parent) {
+        crate::updater::open_url(&directory.to_string_lossy());
+    }
 }
 
 #[cfg(test)]

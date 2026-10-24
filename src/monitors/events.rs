@@ -11,7 +11,68 @@ use windows::{
 };
 const CONSOLE_DISPLAY: GUID = GUID::from_u128(0x6fe69556_704a_47a0_8f24_c28d936fda47);
 thread_local! { static REASONS:RefCell<Vec<SnapshotReason>> = const {RefCell::new(Vec::new())}; }
+/// Logs the raw Windows signal, so a burst of refreshes can be traced to its source.
+fn log_signal(message: u32, w: WPARAM, l: LPARAM) {
+    let line = match message {
+        WM_DISPLAYCHANGE => format!(
+            "WM_DISPLAYCHANGE {}x{} {} bpp",
+            l.0 & 0xffff,
+            (l.0 >> 16) & 0xffff,
+            w.0
+        ),
+        WM_DEVICECHANGE => {
+            let kind = match w.0 as u32 {
+                DBT_DEVICEARRIVAL => "DBT_DEVICEARRIVAL",
+                DBT_DEVICEREMOVECOMPLETE => "DBT_DEVICEREMOVECOMPLETE",
+                DBT_DEVNODES_CHANGED => "DBT_DEVNODES_CHANGED",
+                _ => return,
+            };
+            let mut line = format!("WM_DEVICECHANGE {kind}");
+            if l.0 != 0 && w.0 as u32 != DBT_DEVNODES_CHANGED {
+                // SAFETY: arrival/removal always carry a DEV_BROADCAST_HDR.
+                let header = unsafe { &*(l.0 as *const DEV_BROADCAST_HDR) };
+                if header.dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE {
+                    // SAFETY: the header announced a device interface broadcast,
+                    // whose name is NUL-terminated.
+                    let name = unsafe {
+                        let interface = l.0 as *const DEV_BROADCAST_DEVICEINTERFACE_W;
+                        windows::core::PCWSTR((*interface).dbcc_name.as_ptr())
+                            .to_string()
+                            .unwrap_or_default()
+                    };
+                    line.push_str(&format!(" {name}"));
+                }
+            }
+            line
+        }
+        WM_POWERBROADCAST => match w.0 as u32 {
+            PBT_APMSUSPEND => "WM_POWERBROADCAST suspend".to_owned(),
+            PBT_APMRESUMEAUTOMATIC => "WM_POWERBROADCAST resume (automatic)".to_owned(),
+            PBT_APMRESUMESUSPEND => "WM_POWERBROADCAST resume (user)".to_owned(),
+            PBT_POWERSETTINGCHANGE if l.0 != 0 => {
+                let setting = unsafe { &*(l.0 as *const POWERBROADCAST_SETTING) };
+                if setting.PowerSetting != CONSOLE_DISPLAY || setting.DataLength < 4 {
+                    return;
+                }
+                let state =
+                    unsafe { std::ptr::read_unaligned(setting.Data.as_ptr() as *const u32) };
+                let state = match state {
+                    0 => "off",
+                    1 => "on",
+                    2 => "dimmed",
+                    _ => "unknown",
+                };
+                format!("WM_POWERBROADCAST console display {state}")
+            }
+            _ => return,
+        },
+        _ => return,
+    };
+    super::log(format!("Signal: {line}"));
+}
+
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    log_signal(message, w, l);
     let reason = match message {
         WM_DISPLAYCHANGE => Some(SnapshotReason::DisplaysChanged),
         WM_DEVICECHANGE
